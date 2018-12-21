@@ -1,0 +1,2421 @@
+/*****************************************************************************
+*
+*  Program Package - XXX
+*  Program         - applib[Label Printing]
+*  Module          - svllblrpt.pc
+*  Description     - Prints the SVL standard or combination label depending 
+*                    on the form code
+*
+*  Version  Date           Author
+*  V1.0     04-Oct-2018    Ojal Dev 
+*
+******************************************************************************/
+
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <sqlca.h>
+#include <time.h>
+#include "svllblrpt.h"
+#include "label_lib.h"
+
+#define MAX_WIDTH          132
+#define MAX_STR            400
+
+struct tok_struct 
+{
+    char name [100];
+    char value[100];
+};
+
+/*   Global Variables  */
+
+struct Node {
+    char data[MAX_STR];
+    struct Node* next;
+};
+struct Node* head;
+
+char   token_delimiter;          
+char   print_hot_flag;
+char   just_cd                         = JUST_NONE;
+char   msg_arr[100][50];
+char   gen_date[30+1]                  = "";
+char   printer_type[ PRINTER_TYP_LEN ] = "";
+char   form_cd[ FORM_CD_LEN ]          = "";
+char   routing_cd[ ROUTING_CD_LEN + 1] = "";
+char   alt_case_id[ CASE_LEN ]         = "";
+char   user[4+1]                       = "";
+char   label_type[ LABEL_TYPE_LEN ]    = "";
+char   label_type_error[200]           = "";
+char   MAXLEN[200]                     = "";
+char   err_msg[200]                    = "";
+char   CRLF;
+int    DVPOS                           = 0;
+int    DVINC                           = 0;
+int    DVADD                           = 0;
+int    DVFLD                           = 0;
+int    MAXLIN                          = 0;
+int    fld_width                       = 0;
+int    current_line                    = 1;
+int    error_flag                      = FALSE;
+int    return_status                   = RPT_NORMAL;
+int    first_print                     = TRUE;
+int    auto_inc_flag                   = TRUE;
+int    msg_arr_rec                     = 0;
+int    msg_array_index                 = 0;
+int    tok_arr_rec                     = 0 ;                   /* Keeps track of how many in use */
+struct tok_struct tok_arr[200];
+
+FILE *labelfile;
+
+EXEC SQL BEGIN DECLARE SECTION;
+    char     printer_id[PRINTER_ID_LEN];
+    char     case_id[CASE_LEN];
+    char     cases_flag;
+    varchar  r_d_debug_on[1+1];
+    varchar  dynstmt[SQL_LEN];    
+EXEC SQL END DECLARE SECTION;
+
+int gen_svllblrpt(char *user_param_str, char *report_file)
+{
+    
+    char sel_msg[MAX_STR];
+    char temp_flag[2];
+    char tmp_msg[100];    
+    int index = 0;    
+    
+    EXEC SQL BEGIN DECLARE SECTION;             // to be removed
+        char sql_user_password[25];             // to be removed
+    EXEC SQL END DECLARE SECTION;               // to be removed
+    
+    /* For date and time */
+    time_t rawtime;
+    struct tm *info;    
+    
+    /* Getting the local time and Date*/
+    time( &rawtime );
+    info = localtime( &rawtime );
+    strftime(gen_date,sizeof(gen_date),"%d-%b-%Y %H:%M:%S", info);
+    
+    head = NULL;
+    current_line = 1;
+    
+    /* Connecting to the Database */
+    //if ( (return_status = db_login( NULL, NULL )) != DB_NORMAL )
+    //{
+    //   return( AP_ERROR );
+    //}
+    snprintf(sql_user_password,sizeof(sql_user_password),"%s","dms/dms@dms_12c_len");
+    EXEC SQL CONNECT :sql_user_password;    
+    puts("\nConnected to Oracle.\n");
+    
+    /******************************************************************  
+    *  Process input arguments.                                       *
+    *  Errors are written to the debug file if tracing is on.         *
+    *  If we get a valid printer then we also print an error label    *
+    *  if the arguments are not valid                                 *
+    *******************************************************************/
+    
+    snprintf(sel_msg,sizeof(sel_msg),"%s","---Enter: ");    
+    snprintf(user,sizeof(user),"%s",getenv( "DM_USER" ));    /* Get the user-id from the environment vaiable "DM_USER" */
+    return_status = RPT_NORMAL;
+    
+    snprintf(printer_id,sizeof(printer_id),"%s",extract_arg(user_param_str,1));
+    if ( strlen(printer_id) > 9)
+    {
+        return_status = RPT_INPUT_ERROR;
+        snprintf(tmp_msg,sizeof(tmp_msg),"Invalid Printer Id: %s",printer_id);
+        add_msg(tmp_msg);
+        memset(tmp_msg, '\0', sizeof(tmp_msg));
+        snprintf(printer_id,sizeof(printer_id),"%s","");
+    }
+    
+    snprintf(printer_id,sizeof(printer_id),"%s",strntoupper(printer_id));
+    snprintf(sel_msg,sizeof(sel_msg),"%sp: %s", sel_msg, printer_id);  
+    
+    snprintf(printer_type,sizeof(printer_type),"%s",extract_arg(user_param_str,2));
+    if( strlen(printer_type) > 6 )
+    {
+        return_status = RPT_INPUT_ERROR;
+        snprintf(tmp_msg,sizeof(tmp_msg),"Invalid Printer Type: %s",printer_type);
+        add_msg(tmp_msg);
+        memset(tmp_msg, '\0', sizeof(tmp_msg));
+        snprintf(printer_type,sizeof(printer_type),"%s","");
+    }
+    
+    snprintf(printer_type,sizeof(printer_type),"%s",strntoupper(printer_type));
+    snprintf(sel_msg,sizeof(sel_msg),"%s,t: %s", sel_msg, printer_type); 
+    
+    
+    
+    snprintf(form_cd,sizeof(form_cd),"%s",extract_arg(user_param_str,3));
+    if( strlen(form_cd) > 6 )
+    {
+        return_status = RPT_INPUT_ERROR;
+        snprintf(tmp_msg,sizeof(tmp_msg),"Invalid Form Code: %s",form_cd);
+        add_msg(tmp_msg);
+        memset(tmp_msg, '\0', sizeof(tmp_msg));
+        snprintf(form_cd,sizeof(form_cd),"%s","");
+    }
+    
+    snprintf(form_cd,sizeof(form_cd),"%s",strntoupper(form_cd));
+    snprintf(sel_msg,sizeof(sel_msg),"%s,f: %s", sel_msg, form_cd); 
+    
+    if (strcmp(printer_id,"") == 0 && (strcmp(printer_type,"")==0 || strcmp(form_cd,"")==0))
+    {
+        return_status = RPT_PRINTER_ERROR;
+        add_msg( "Printer id required or" );
+        add_msg( "Printer type and Form required" );
+    }
+    
+    snprintf(case_id,sizeof(case_id),"%s",extract_arg(user_param_str,4));
+    if( strlen(case_id) > 20 )
+    {
+        return_status = RPT_INPUT_ERROR;
+        snprintf(tmp_msg,sizeof(tmp_msg),"Invalid Case Id: %s",case_id);
+        add_msg(tmp_msg);
+        add_msg("Input status: Failed for case_id");
+        memset(tmp_msg, '\0', sizeof(tmp_msg));
+        snprintf(case_id,sizeof(case_id),"%s","");
+    }
+    
+    snprintf(sel_msg,sizeof(sel_msg),"%s,c: %s", sel_msg, case_id); 
+    
+    
+    snprintf(temp_flag,sizeof(temp_flag),"%s",extract_arg(user_param_str,5));
+    if( strlen(temp_flag) ==1 )
+    {
+        print_hot_flag = temp_flag[0];
+    }
+    else
+    {
+        return_status = RPT_INPUT_ERROR;
+        snprintf(tmp_msg,sizeof(tmp_msg),"Invalid print hot: %s",temp_flag);
+        add_msg(tmp_msg);
+        memset(tmp_msg, '\0', sizeof(tmp_msg));
+        print_hot_flag = '\0';
+    }
+    
+    print_hot_flag = toupper(print_hot_flag);
+    snprintf(sel_msg,sizeof(sel_msg),"%s,h: %c",sel_msg,print_hot_flag);
+    
+    
+    snprintf(routing_cd,sizeof(routing_cd),"%s",extract_arg(user_param_str,6));
+    if( strlen(routing_cd) > 6 )
+    {
+        return_status = RPT_INPUT_ERROR;
+        snprintf(tmp_msg,sizeof(tmp_msg),"Invalid routing code information: %s",routing_cd);
+        add_msg(tmp_msg);
+        memset(tmp_msg, '\0', sizeof(tmp_msg));
+        snprintf(routing_cd,sizeof(routing_cd),"%s","");
+    }
+    
+    snprintf(routing_cd,sizeof(routing_cd),"%s",strntoupper(routing_cd));
+    snprintf(sel_msg, sizeof(sel_msg), "%s,r: %s", sel_msg, routing_cd);
+    
+    snprintf(temp_flag,sizeof(temp_flag),"%s",extract_arg(user_param_str,7));
+    if( strlen(temp_flag) == 1 )
+    {
+        cases_flag = temp_flag[0];
+    }
+    else
+    {
+        return_status = RPT_INPUT_ERROR;
+        snprintf(tmp_msg,sizeof(tmp_msg),"Invalid cases flag: %s",temp_flag);
+        add_msg(tmp_msg);
+        memset(tmp_msg, '\0', sizeof(tmp_msg));
+        cases_flag = 'N';
+    }
+    
+    cases_flag = toupper(cases_flag);
+    if ( cases_flag != 'Y' )
+        cases_flag = 'N';
+    
+    snprintf(sel_msg,sizeof(sel_msg),"%s,cflag: %c,u: %s", sel_msg, cases_flag,user);
+    
+    debug (sel_msg);
+    
+    snprintf(alt_case_id,sizeof(alt_case_id),"%s",extract_arg(user_param_str,8));
+    if( strlen(alt_case_id) > 20 )
+    {
+        return_status = RPT_INPUT_ERROR;
+        snprintf(tmp_msg,sizeof(tmp_msg),"Invalid Alternate Case Id: %s",alt_case_id);
+        add_msg(tmp_msg);
+        add_msg("Input status: Failed for alt_case_id");
+        memset(tmp_msg, '\0', sizeof(tmp_msg));
+        snprintf(alt_case_id,sizeof(alt_case_id),"%s","");
+    }
+    snprintf(sel_msg,sizeof(sel_msg),"%s,a: %s",sel_msg, alt_case_id);
+    debug (sel_msg);
+    
+    snprintf(err_msg,sizeof(err_msg),"%s", extract_arg(user_param_str,9));
+    
+    labelfile = fopen (report_file, "w");
+    if (labelfile == NULL)
+    {
+        debug("\nError in opening output file.\n");
+        exit (1);
+    }        
+    
+    /* Get printer type and form code */
+    if ( strcmp(printer_id,"") != 0 )
+        get_printer_info();
+    
+    /* Gets the printer specific token delimiter as defined in system */
+    if ( strcmp(printer_type,"") != 0 )
+        get_token_delimiter();
+    
+    /* Build format file prefix from label type */
+    snprintf(label_type,sizeof(label_type),"%s",form_cd);
+    
+    /* Build error label format file prefix from label type and form code */
+    snprintf(label_type_error,sizeof(label_type_error),"%s",LBL_TYPE_ERROR);
+    
+    /* Any errors up to this point will cause us to stop. */
+    if ( return_status != RPT_NORMAL )
+    {
+        /* Dump any messages to debug */
+        index = 0;
+        
+        while( index <= msg_arr_rec)
+        {
+            debug( msg_arr[index] );
+            index++;
+        }
+        
+        snprintf(tmp_msg,sizeof(tmp_msg),"---Exit: %d",return_status);
+        debug ( tmp_msg );
+        memset(tmp_msg, '\0', sizeof(tmp_msg));
+        
+        if ( strcmp(printer_type,"") != 0 || strcmp(printer_type," ")!= 0 )
+        {
+            generate_error_label( "" );
+            write_label();
+        }
+        exit(1);
+    }
+    
+    /*  (future) A passed in error message supersedes any other input errors. */
+    if( strcmp(err_msg,"") != 0)
+    {
+        generate_error_label( err_msg );
+    }
+    
+    generate_label();
+    
+    write_label();
+    
+    /* if (labelfile != NULL)
+        fclose(labelfile); */
+    
+   return (return_status);    
+}
+
+/****************************************************************************
+* Function : add_msg                                                        *
+*                                                                           *
+* This function add an error message to the array.                          *
+* First time through we also add a message with user number and timestamp.  *
+****************************************************************************/
+
+void add_msg(char message[])
+{
+    
+    if ( msg_arr_rec == 0 )
+    {
+        snprintf( msg_arr[msg_arr_rec], sizeof(msg_arr[msg_arr_rec]), "User: %s  %s", user, gen_date);
+        msg_arr_rec++;
+    }
+    
+    snprintf(msg_arr[msg_arr_rec],sizeof(msg_arr[msg_arr_rec]),"%s",message);
+    msg_arr_rec++;    
+}
+
+
+/****************************************************************************
+* Function : debug                                                          *
+*                                                                           *
+* This function writes a debug message to $DM_LOG/svlstdrpt.log             *
+* May be switched on/off with system parameter, SVLSTD_D                    *
+* Well get the value of the parameter once, the first time this function    *
+* is called.                                                                *
+****************************************************************************/
+
+void debug( char msg[] )
+{
+    char file_name[200];
+    char shell_msg[200];
+    FILE *logfile = NULL;
+    
+    EXEC SQL BEGIN DECLARE SECTION;
+        short r_d_debug_on_ind = 0;
+    EXEC SQL END DECLARE SECTION;
+    
+    if( strcmp(r_d_debug_on.arr,"") == 0 )
+    {
+        snprintf(r_d_debug_on.arr,sizeof(r_d_debug_on.arr),"%s","N");
+        r_d_debug_on.len = strlen( r_d_debug_on.arr );
+    }
+    if ( strcmp(r_d_debug_on.arr,"Y") != 0 )
+    {
+        EXEC SQL SELECT SUBSTR( param_value, 1, 1 )
+                        INTO :r_d_debug_on:r_d_debug_on_ind
+                    FROM SYS_PARAMETER
+                    WHERE param_name = 'SVLLBL_D';
+        
+      /*if (sqlca.sqlcode == 0)
+            printf("debug:fetch from SYS_PARAMETER success.r_d_debug_on-%s\n",r_d_debug_on.arr);
+        else
+            printf("debug:SQL Error SYS_PARAMETER-%s.r_d_debug_on-%s\n",sqlca.sqlerrm.sqlerrmc,r_d_debug_on.arr);*/
+        if ( r_d_debug_on_ind == -1)
+            memset(r_d_debug_on.arr, '\0', sizeof(r_d_debug_on.arr));
+        
+        r_d_debug_on.len = strlen(r_d_debug_on.arr);
+        r_d_debug_on.arr[r_d_debug_on.len] = '\0';
+    }
+    
+    if ( strcmp(r_d_debug_on.arr,"Y") == 0 )
+    {
+        snprintf(file_name,sizeof(file_name),"%s/%s",getenv( "DM_LOG" ),DEBUG_FILE_NAME);
+        logfile = fopen (file_name, "a");
+        if (logfile == NULL)
+        {
+            snprintf(shell_msg,sizeof(shell_msg),"echo %s Error  opening debug file >> $DM_LOG/%s",gen_date, DEBUG_FILE_NAME );
+            system( shell_msg );
+        }
+        else
+        {
+            snprintf(r_d_debug_on.arr,sizeof(r_d_debug_on.arr),"%s","Y");
+        }        
+    }
+    
+    if( strcmp(r_d_debug_on.arr,"Y") == 0 )
+    {
+        fprintf(logfile,"%s %d %s %s\n",user,getpid(),gen_date,msg);
+    }
+    
+    if ( logfile != NULL )
+        fclose(logfile);
+}
+
+/****************************************************************************
+* Function : get_printer_info                                               *
+*                                                                           *
+* This function get the printer information                                 *
+*                                                                           *
+****************************************************************************/
+
+void get_printer_info()
+{
+    char tmp_msg[100];
+    
+    EXEC SQL BEGIN DECLARE SECTION;
+        short config_file_ind = 0;
+        short form_cd_db_ind = 0;
+        short printer_type_cd_ind = 0;
+        varchar  config_file[30 + 1];
+        varchar  form_cd_db[FORM_CD_LEN];
+        varchar  printer_type_cd[6 +1];
+    EXEC SQL END DECLARE SECTION;
+    
+    if( strcmp(printer_id,"") != 0)
+    {
+        EXEC SQL SELECT LP.PRINTER_TYPE_CD, LP.FORM_CD, LP.CONFIG_FILE
+                    INTO :printer_type_cd:printer_type_cd_ind,
+                         :form_cd_db:form_cd_db_ind,
+                         :config_file:config_file_ind
+                FROM LABEL_PRINTER LP
+                WHERE LP.PRINTER_ID = :printer_id;
+                
+        if (sqlca.sqlcode != 0)
+        {
+            snprintf(tmp_msg, sizeof(tmp_msg),"svllblrpt.pc - get_printer_info:SQL Error-%s\n",sqlca.sqlerrm.sqlerrmc);
+            debug( tmp_msg );
+        }            
+        
+        /* NULL check for the host variables */
+        if ( config_file_ind == -1)
+            memset(config_file.arr, '\0', sizeof(config_file.arr));
+        if ( form_cd_db_ind == -1)
+            memset(form_cd_db.arr, '\0', sizeof(form_cd_db.arr));
+        if ( printer_type_cd_ind == -1)
+            memset(printer_type_cd.arr, '\0', sizeof(printer_type_cd.arr));
+        
+        printer_type_cd.arr[printer_type_cd.len] = '\0';
+        form_cd_db.arr[form_cd_db.len] = '\0';
+        config_file.arr[config_file.len] = '\0';
+    }
+    else
+    {
+        return_status = RPT_PRINTER_ERROR;
+        snprintf(tmp_msg,sizeof(tmp_msg),"Printer not found: %s",printer_id);
+        debug( tmp_msg );
+        debug("---Exit:    5"  );
+        exit(1);
+    }
+    
+    if( strcmp(printer_type_cd.arr," ") == 0)
+    {
+        return_status = RPT_PRINTER_ERROR;
+        snprintf(tmp_msg,sizeof(tmp_msg),"Printer type is null: %s",printer_id);
+        debug( tmp_msg );
+        debug("---Exit:    5"  );
+        exit(1);
+    }
+    
+    if( strcmp(config_file.arr,"") != 0)
+    {
+        if ( strstr( config_file.arr, "/") )
+            snprintf(config_file.arr,sizeof(config_file.arr),"%s",config_file.arr);
+        else
+            snprintf(config_file.arr,sizeof(config_file.arr),"$DM_DAT/%s",config_file.arr);
+        
+        put_token( TOK_CFGFILE, config_file.arr );
+    }
+    
+    memset(printer_type, '\0', sizeof(printer_type));
+    memset(form_cd, '\0', sizeof(form_cd));
+    
+    snprintf(printer_type,sizeof(printer_type),"%s",printer_type_cd.arr);
+    snprintf(form_cd,sizeof(form_cd),"%s",form_cd_db.arr);    
+}
+
+
+/****************************************************************************
+* Function : get_token_delimiter                                            *
+*                                                                           *
+* This function gets the printer specific token delimiter                  *
+* as defined in system                                                      *
+*                                                                           *
+****************************************************************************/
+
+void get_token_delimiter()
+{
+    char tmp_msg[100];
+    
+    EXEC SQL BEGIN DECLARE SECTION;
+        char param_name[50];
+        char token;
+    EXEC SQL END DECLARE SECTION;
+    
+    snprintf(param_name,sizeof(param_name),"%s%s",SYS_PARM_TOKDELIM,strntoupper(printer_type));
+    
+    EXEC SQL SELECT NVL(param_value,' ')
+                    INTO :token
+                FROM SYS_PARAMETER
+                WHERE param_name =:param_name;
+                
+    if (sqlca.sqlcode != 0)
+    {
+        snprintf(tmp_msg,sizeof(tmp_msg),"svllblrpt.pc - get_token_delimiter:SQL Error-%s",sqlca.sqlerrm.sqlerrmc);
+        debug( tmp_msg );
+    }
+   
+    if( token == ' ' )
+    {
+        token_delimiter = TOKEN_DELIMITER;
+        snprintf(tmp_msg,sizeof(tmp_msg),"System param %s not found, status %d",param_name,return_status);
+        debug( tmp_msg );
+    }
+    else
+    {
+        token_delimiter = token;
+    }
+}
+
+/****************************************************************************
+* Function : generate_label                                                 *
+*                                                                           *
+* This function creates an error label using the error format file for the  *
+* printer type.It can only be called if the printer type has been           *
+* determined.                                                               *
+*                                                                           *
+****************************************************************************/
+
+void generate_error_label( char msg[] )
+{    
+    char tmp_msg[50];
+    
+    EXEC SQL ROLLBACK;
+    
+    if( strcmp(msg,"") != 0 )
+        add_msg( msg );
+    
+    snprintf(tmp_msg,sizeof(tmp_msg),"Case: %s",case_id );
+    add_msg( tmp_msg );
+    /* Call function cp_write_label to generate error label */
+    cp_write_label( LBL_TYPE_ERROR,printer_type );
+
+    write_maxlen();
+    write_label();
+    exit (1);
+}
+
+/****************************************************************************
+* Function : generate_label                                                 *
+*                                                                           *
+* This function Generate label(s) based on selection criteria               *
+*                                                                           *
+****************************************************************************/
+
+void generate_label ()
+{
+    char tmp_msg[20];
+    char tmp[MAX_WIDTH+1];
+    char svlcmb_form_cd[FORM_CD_LEN];
+    
+    if ( print_hot_flag == 'Y' )
+        put_token( TOK_HOT, "HOT" );
+    else
+        put_token( TOK_HOT, "" );
+    
+    if ( strcmp (alt_case_id,"") != 0 )
+        snprintf(tmp_msg, sizeof(tmp_msg),"%s", substr( alt_case_id , (strlen(alt_case_id) - 4),5)) ;
+    else
+        snprintf(tmp_msg, sizeof(tmp_msg),"%s", substr( case_id , (strlen(case_id) - 4),5)) ;
+    
+    put_token( TOK_CASE5DIG, tmp_msg );
+    put_token( TOK_CASE, case_id );
+    
+    /* Route code string is variable length - Monarch has midpoint command; SATO does not */
+    
+    put_token( TOK_ROUTECD, routing_cd );
+    
+    /* For best alignment to midpoint of label we create a space padded string that can be centered */
+    ap_just( routing_cd, ROUTING_CD_LEN,AP_JUST_CENTER,' ', tmp);
+    put_token( TOK_ROUTECDC, tmp );
+   
+   /* Assign tokens based on whether length of route code string is even or odd */    
+    if ( strlen(routing_cd)%2 == 0 )
+        put_token( TOK_ROUTECDCE, tmp );
+    else
+        put_token( TOK_ROUTECDCO, tmp );
+    
+    get_syspar( AP_SYS_PARAM_FORM_SVLCMB, svlcmb_form_cd );    
+    //get_syspar( "FORMSVLC", svlcmb_form_cd );
+    
+    if( strcmp(svlcmb_form_cd,"") == 0 )
+    {
+        snprintf(svlcmb_form_cd,sizeof(svlcmb_form_cd),"%s",AP_FORM_CD_SVLCMB_LABEL);
+    }
+    
+    /* A combination label requires an order case */    
+    if ( (cases_flag == 'Y') && (strcmp(form_cd,svlcmb_form_cd) ==0) )
+        generate_error_label( "Order case required for combo label" );
+    
+    /* Get infomation about the Case-ID from the database */    
+    get_case_info();
+    
+    /* generate the Label file */
+    cp_write_label (label_type, printer_type);
+    
+    debug ("---Exit:---" );
+
+}
+
+
+/****************************************************************************
+* Function : get_case_info                                                  *
+*                                                                           *
+* Get union of order case and receiving case information but only use the   *
+* receiving case information when the order case is not found and it is the *
+* standard label. This assumes that the calling function will use the order *
+* case id if exists.                                                        *
+*                                                                           *
+****************************************************************************/
+
+void get_case_info()
+{
+    
+    //int  sdv_qty                   = 0  ;
+    int  units                     = 0  ;
+    int  sdv_cnt                   = 0  ;
+    int  rfid_qty_t                = 0  ;
+    int  sdv_le                    = 0  ;
+    int  tem_le                    = 0  ;    
+    char case_t[20]                = "" ;
+    char bcase[20]                 = "" ;
+    char upca[20]                  = "" ;
+    char btype[30]                 = "" ;
+    char xxxcase[40]               = "" ;
+    char casestr [40]              = "" ;
+    char casestrr[40]              = "" ;
+    char casestrc[40]              = "" ;
+    char bcase20 [40]              = "" ;
+    char bcase12 [40]              = "" ;
+    char ctnstr  [40]              = "" ;
+    char xxxctn  [40]              = "" ;
+    char tonum   [5+1]             = "" ;
+    char store   [10+1]            = "" ;
+    char toaddr1 [40+1]            = "" ;
+    char toaddr2 [TOADDR2_LEN +1]  = "" ;
+    char toaddr2c[TOADDR2_LEN +1]  = "" ;
+    char to_state[TO_STATE_LEN+1]  = "" ;
+    char date1   [20 +1]           = "" ;
+    char price_ind[1+1]            = "" ;
+    char inbdi[8+1]                = "" ;
+    char inbdiflg[1+1]             = "" ;
+    char ponum[8+1]                = "" ;
+    char div[5+1]                  = "" ;
+    char tmp_sdv[4+1]              = "" ;
+    char min_sdv[4+1]              = "" ;
+    char debut_sdv[4+1]            = "" ;
+    char ft_sdv[4+1]               = "" ;
+    char af_sdv[4+1]               = "" ;
+    char sdv[4+1]                  = "" ;
+    char fsd_str_temp[20+1]        = "" ;
+    char info_pri_str_temp[20+1]   = "" ;
+    char tmp_arr[20+1]             = "" ;
+    char temp_msg1[50]             = "" ;
+    char units_fmt[7+1]            = "" ;
+    char rfid_status[10+1]         = "" ;
+    char tmp_msg2[50+1]            = "" ;
+    char min_info_pri_str[50+1]    = "" ;
+    char log_msg[100]              = "" ;
+    short fetch_flag               = 0  ;
+    double debut_qty_temp          = 0  ;
+    double ft_qty_temp             = 0  ;
+    double af_qty_temp             = 0  ;
+    double sdv_qty_temp            = 0  ;
+    double tmp_days                = 0  ;
+    
+    
+    EXEC SQL BEGIN DECLARE SECTION;
+        int      rfid_qty;
+        int      po_cnt;
+        int      div_cnt;
+        char     case_type;
+        double   price_res;
+        double   rfid_ssc_cases;
+        double   qty;
+        double   debut_qty;
+        double   ft_qty;
+        double   af_qty;
+        varchar  case_id_db[CASE_LEN]; 
+        varchar  arrival_date[8+1];
+        varchar  arrival_mmdd[8+1];
+        varchar  rfid_cd[2];
+        varchar  sss_rfid_cd[2];
+        varchar  store_num[6+1];
+        varchar  create_dt[20+1];
+        varchar  create_user_id[4+1];
+        varchar  rptg_sdv[4+1];
+        varchar  store_name[40 + 1];
+        varchar  address[40+1];
+        varchar  city_name[30+1];
+        varchar  state_cd[4+1];
+        varchar  division[2+1];
+        varchar  sl_msg[8+1];
+        varchar  div_descr[40+1];
+        varchar  fsd_str[20+1];
+        varchar  info_pri_str[20+1];
+        varchar  po_num[8 + 1];    
+        varchar  in_store_date[8+1];
+        
+        /*Indicator Variables */
+        short    case_id_db_ind;
+        short    store_num_ind;
+        short    create_dt_ind;
+        short    create_user_id_ind;
+        short    rptg_sdv_ind;
+        short    store_name_ind;
+        short    address_ind;
+        short    city_name_ind;
+        short    state_cd_ind;
+        short    division_ind;
+        short    sl_msg_ind;
+        short    div_descr_ind;
+        short    po_num_ind;
+        short    in_store_date_ind;
+        short    fsd_str_ind;
+        short    info_pri_str_ind;
+        short    arrival_date_ind;
+        short    arrival_mmdd_ind;
+        short    rfid_cd_ind;
+        short    sss_rfid_cd_ind;
+        
+    EXEC SQL END DECLARE SECTION;    
+    
+    
+    memset(xxxctn , '\0',sizeof(xxxctn));
+    memset(ctnstr , '\0',sizeof(ctnstr));
+    memset(bcase12, '\0',sizeof(bcase12));
+        
+    snprintf(min_sdv,sizeof(min_sdv),"%s", rpad(min_sdv, ITEM_SDV_LEN, ' '));    
+    snprintf(min_info_pri_str,sizeof(min_info_pri_str),"%s", rpad(min_info_pri_str, QTY_LEN + INFO_VI_CD_LEN, ' ') );
+    
+   /************************************************************************************************************
+   * The "case_id" could really be a XXX carton number (for a reprint of a ship-to-mark-for case),             *
+   * so we format the output based on the length.                                                              *
+   * A code 128 barcode is printed for cases and cartons but the man readable part is formatted as follows:    *
+   * XXX carton:   12-1234-12345-1                                                                             *
+   * SSCC-18 case: (00) 0 1234567 123456789 0                                                                  *
+   * A text string indicates the type,"Code 128" or "SSCC-18"                                                  *
+   * We'll show the man-readable case id regardless of errors to follow.                                       *
+   * We'll clear the barcode later if an error occurs.                                                         *
+   ************************************************************************************************************/
+    
+    snprintf(case_t,sizeof(case_t),"%s",case_id );
+    snprintf(bcase ,sizeof(bcase) ,"%s",case_id );
+    
+    if ( strlen(case_id) == CARTON_NUM_LEN )
+    {
+        snprintf(btype  ,sizeof(btype)  ,"%s","Code 128" );
+        snprintf(xxxctn ,sizeof(xxxctn) ,"%s","XXX Carton" );
+        snprintf(ctnstr ,sizeof(ctnstr) ,"%s",edit_str(case_id, "XX-XXXX-XXXXX-X") );        
+        ap_just ( ctnstr, 26, AP_JUST_RIGHT, ' ', casestrr );
+        ap_just ( ctnstr, 26, AP_JUST_CENTER, ' ', casestrc );
+        snprintf(bcase12 ,sizeof(bcase12) ,"%s",case_id );
+    }
+    else
+    {        
+        if ( strlen(case_id) == CASE_ID_LEN )
+        {
+            snprintf(btype ,sizeof(btype) ,"%s","SSCC-18" );
+            snprintf(xxxcase ,sizeof(xxxcase) ,"%s","Case" );
+            snprintf(casestr ,sizeof(casestr) ,"%s",edit_str(case_id, "(XX) X XXXXXXX XXXXXXXXX X" ));            
+            snprintf(casestrr ,sizeof(casestrr) ,"%s",casestr );
+            snprintf(casestrc ,sizeof(casestrc) ,"%s",casestr );
+            snprintf(bcase20 ,sizeof(bcase20) ,"%s",case_id );
+        }
+        else
+        {
+            /* This is likely a 8 digit case id that was assigned to a receiving case due to a unreadable case label.
+               This case when closed will get new compliant 20 digit case id for the order case. */
+            snprintf(btype ,sizeof(btype) ,"%s","CID" );
+            snprintf(xxxcase ,sizeof(xxxcase) ,"%s","CID" );       /* This does not have a mask for man readable text     */         
+            snprintf(casestr ,sizeof(casestr) ,"%s",casestr );
+            snprintf(casestrr ,sizeof(casestrr) ,"%s",casestr );
+            snprintf(casestrc ,sizeof(casestrc) ,"%s",casestr );
+            snprintf(bcase12 ,sizeof(bcase12) ,"%s",case_id );     /* There is no 8 digit token use the closest in length. */
+        }
+    }
+    
+    memset(dynstmt.arr,'\0',sizeof(dynstmt.arr));    
+    /* This function create the query string based on cases_flag vale */
+    query_gen();
+    
+    EXEC SQL PREPARE S FROM :dynstmt;
+    EXEC SQL DECLARE C CURSOR FOR S;
+    EXEC SQL OPEN C;
+    
+    if (sqlca.sqlcode != 0)
+    {
+        snprintf(log_msg,sizeof(log_msg),"svllblrpt.pc-get_case_info:Cursor open failed-%s",sqlca.sqlerrm.sqlerrmc);
+        debug(log_msg);
+    }
+    
+    memset(tonum,'\0',sizeof(tonum));
+    
+   /* IR37943 Get associated receiving case here because Oracle could not be otherwised "convinced" to stop doing
+      MERGE JOIN and full table scan on cases in main select ord case inner loop that gets case content price result */
+    
+    for (;;)
+    {
+        EXEC SQL FETCH C into               :case_type,
+                                            :case_id_db:case_id_db_ind,
+                                            :arrival_date:arrival_date_ind,
+                                            :arrival_mmdd:arrival_mmdd_ind,
+                                            :rfid_cd:rfid_cd_ind,
+                                            :sss_rfid_cd:sss_rfid_cd_ind,
+                                            :price_res,
+                                            :rfid_ssc_cases,
+                                            :store_num:store_num_ind,
+                                            :create_dt:create_dt_ind,
+                                            :create_user_id:create_user_id_ind,
+                                            :rptg_sdv:rptg_sdv_ind,
+                                            :store_name:store_name_ind,
+                                            :address:address_ind,
+                                            :city_name:city_name_ind,
+                                            :state_cd:state_cd_ind,
+                                            :division:division_ind,
+                                            :sl_msg:sl_msg_ind,
+                                            :div_descr:div_descr_ind,
+                                            :div_cnt,
+                                            :po_num:po_num_ind,
+                                            :po_cnt,
+                                            :in_store_date:in_store_date_ind,
+                                            :rfid_qty,
+                                            :fsd_str:fsd_str_ind,
+                                            :info_pri_str:info_pri_str_ind,
+                                            :qty,
+                                            :debut_qty,
+                                            :ft_qty,
+                                            :af_qty;
+        
+        if (sqlca.sqlcode == 0)
+        {
+            fetch_flag = 1;
+        }
+        else
+        {
+            if (fetch_flag == 0)
+            {
+                snprintf(log_msg,sizeof(log_msg),"svllblrpt.pc-get_case_info:Fetch failed-%s",sqlca.sqlerrm.sqlerrmc);
+                debug(log_msg);
+            }
+            break;
+           
+        }
+        
+        /* checking for any NULL values return from the database */
+        if ( case_id_db_ind == -1)
+            memset(case_id_db.arr, '\0', sizeof(case_id_db.arr));
+        if ( store_num_ind == -1)
+            memset(store_num.arr, '\0', sizeof(store_num.arr));
+        if ( create_dt_ind == -1)
+            memset(create_dt.arr, '\0', sizeof(create_dt.arr));
+        if ( create_user_id_ind == -1)
+            memset(create_user_id.arr, '\0', sizeof(create_user_id.arr));
+        if ( rptg_sdv_ind == -1)
+            memset(rptg_sdv.arr, '\0', sizeof(rptg_sdv.arr));
+        if ( store_name_ind == -1)
+            memset(store_name.arr, '\0', sizeof(store_name.arr));
+        if ( address_ind == -1)
+            memset(address.arr, '\0', sizeof(address.arr));
+        if ( city_name_ind == -1)
+            memset(city_name.arr, '\0', sizeof(city_name.arr));
+        if ( state_cd_ind == -1)
+            memset(state_cd.arr, '\0', sizeof(state_cd.arr));
+        if ( division_ind == -1)
+            memset(division.arr, '\0', sizeof(division.arr));
+        if ( sl_msg_ind == -1)
+            memset(sl_msg.arr, '\0', sizeof(sl_msg.arr));
+        if ( div_descr_ind == -1)
+            memset(div_descr.arr, '\0', sizeof(div_descr.arr));
+        if ( po_num_ind == -1)
+            memset(po_num.arr, '\0', sizeof(po_num.arr));
+        if ( in_store_date_ind == -1)
+            memset(in_store_date.arr, '\0', sizeof(in_store_date.arr));
+        if ( fsd_str_ind == -1)
+            memset(fsd_str.arr, '\0', sizeof(fsd_str.arr));
+        if ( info_pri_str_ind == -1)
+            memset(info_pri_str.arr, '\0', sizeof(info_pri_str.arr));
+        if ( arrival_date_ind == -1)
+            memset(arrival_date.arr, '\0', sizeof(arrival_date.arr));
+        if ( arrival_mmdd_ind == -1)
+            memset(arrival_mmdd.arr, '\0', sizeof(arrival_mmdd.arr));
+        if ( rfid_cd_ind == -1)
+            memset(rfid_cd.arr, '\0', sizeof(rfid_cd.arr));
+        if ( sss_rfid_cd_ind == -1)
+            memset(sss_rfid_cd.arr, '\0', sizeof(sss_rfid_cd.arr));
+        
+        case_id_db.arr[ case_id_db.len] = '\0';
+        store_num.arr[ store_num.len] = '\0';
+        create_dt.arr[ create_dt.len] = '\0';
+        create_user_id.arr[ create_user_id.len] = '\0';
+        rptg_sdv.arr[ rptg_sdv.len] = '\0';
+        store_name.arr[ store_name.len] = '\0';
+        address.arr[ address.len] = '\0';
+        city_name.arr[ city_name.len] = '\0';
+        state_cd.arr[ state_cd.len] = '\0';
+        division.arr[ division.len] = '\0';
+        sl_msg.arr[ sl_msg.len] = '\0';
+        div_descr.arr[ div_descr.len] = '\0';
+        po_num.arr[ po_num.len] = '\0';
+        in_store_date.arr[ in_store_date.len] = '\0';
+        fsd_str.arr[ fsd_str.len] = '\0';
+        info_pri_str.arr[ info_pri_str.len] = '\0';
+        arrival_date.arr[ arrival_date.len] = '\0';
+        arrival_mmdd.arr[ arrival_mmdd.len] = '\0';
+        rfid_cd.arr[ rfid_cd.len] = '\0';
+        sss_rfid_cd.arr[ sss_rfid_cd.len] = '\0';
+                
+   /******************************************************************************************** 
+   *  Multiple rows may be returned if there are multiple subdivisions in case contents        *
+   *  There is a precedence for which subdivision is listed (when multiple have same qty)      *
+   *  1. Debut qty descending, subdivision ascending                                           *
+   *  2. FT qty descending, subdivision ascending                                              *
+   *  3. AT qty descending, subdivision ascending                                              *
+   *  4. Subdivision qty descending, subdivision ascending                                     *
+   ********************************************************************************************/
+ 
+        /* Save case header info only on first fetch */
+        if( strcmp(tonum,"") == 0 )
+        {
+            snprintf(tonum,sizeof(tonum),"%s", store_num.arr );  
+            snprintf(store,sizeof(store),"%s",edit_str( store_num.arr,"XXXX-X"));
+            snprintf(toaddr1,sizeof(toaddr1),"%s", address.arr );
+            
+            if ( strcmp( city_name.arr,"") !=0 && strcmp( state_cd.arr,"") !=0 )
+            {
+                snprintf(toaddr2,sizeof(toaddr2),"%s, %s", substr(city_name.arr, 1, CITY_LEN), substr(state_cd.arr, 1, TO_STATE_LEN));
+                ap_just( toaddr2, TOADDR2_LEN, AP_JUST_CENTER, ' ', toaddr2c );
+            }
+            else
+            {
+                ap_just( "(unknown)", TOADDR2_LEN, AP_JUST_CENTER, ' ', toaddr2c );
+            }
+            
+            snprintf(to_state,sizeof(to_state),"%s", substr( state_cd.arr, 1, TO_STATE_LEN));
+            snprintf(date1,sizeof(date1),"%s", create_dt.arr);
+            snprintf(user,sizeof(user),"%s", create_user_id.arr);
+            
+            //price_ind = ( price_res == 0) ? "P" : " ";
+            if ( price_res == 0)
+                snprintf(price_ind,sizeof(price_ind),"%s","P");
+            else
+                snprintf(price_ind,sizeof(price_ind),"%s","");
+            
+            snprintf(inbdi,sizeof(inbdi),"%s", po_num.arr);
+            snprintf(inbdiflg,sizeof(inbdiflg),"%s","");
+            
+            if (  po_cnt == 1 )
+            {
+                snprintf(ponum,sizeof(ponum),"%s", po_num.arr);
+            }
+            else if (  po_cnt > 1 )
+            {
+                snprintf(ponum,sizeof(ponum),"%s","(multiple)");
+                snprintf(inbdiflg,sizeof(inbdiflg),"%s","+");
+            }
+            
+            if ( strcmp( div_descr.arr,"") == 0 )
+            {
+                snprintf(div,sizeof(div),"%s", division.arr);
+            }
+            else
+            {
+                snprintf(div,sizeof(div),"%.2s",strntoupper( div_descr.arr));
+            }
+            
+            if (  div_cnt > 1 )
+            {
+                snprintf(div,sizeof(div),"%s+",div);
+            }
+        
+        }
+        
+        units +=  qty;
+        sdv_cnt++;
+        rfid_qty_t +=  rfid_qty;
+        
+        /* Check whether this sdv is less than or equal to saved debut sdv */
+        snprintf(tmp_sdv,sizeof(tmp_sdv),"%s", rptg_sdv.arr);
+        
+        if ( strcmp(tmp_sdv,min_sdv) > 0 && strcmp(tmp_sdv,debut_sdv) < 0 )
+            sdv_le = 1;
+        else
+            sdv_le = 0;
+        
+        if ( ( debut_qty > debut_qty_temp ) || (  debut_qty > 0 &&  debut_qty == debut_qty_temp && sdv_le == 1 ) )
+        {
+            debut_qty_temp =  debut_qty;
+            snprintf(debut_sdv,sizeof(debut_sdv),"%s",tmp_sdv );
+        }
+        
+        if ( strcmp(tmp_sdv,min_sdv) > 0 && strcmp(tmp_sdv,ft_sdv) < 0 )
+            sdv_le = 1;
+        else
+            sdv_le = 0;
+        
+        if (  ft_qty > ft_qty_temp || (  ft_qty > 0 &&  ft_qty == ft_qty_temp && sdv_le == 1 ) )
+        {
+            ft_qty_temp =  ft_qty;
+            snprintf(ft_sdv,sizeof(ft_sdv),"%s",tmp_sdv );
+        }
+        
+        if ( strcmp(tmp_sdv,min_sdv) > 0 && strcmp(tmp_sdv,af_sdv) < 0 )
+            sdv_le = 1;
+        else
+            sdv_le = 0;
+        
+        if (  af_qty > af_qty_temp || (  af_qty > 0 &&  af_qty == af_qty_temp  && sdv_le == 1 ) )
+        {
+            af_qty_temp =  af_qty;
+            snprintf(af_sdv,sizeof(af_sdv),"%s",tmp_sdv );
+        }
+        
+        if ( strcmp(tmp_sdv,min_sdv) > 0 && strcmp(tmp_sdv,sdv) < 0 )
+            sdv_le = 1;
+        else
+            sdv_le = 0;
+        
+        
+        if (  qty > sdv_qty_temp || (  qty > 0 &&  qty == sdv_qty_temp && sdv_le == 1 ) )
+        {
+            sdv_qty_temp =  qty;
+            snprintf(sdv,sizeof(sdv),"%s",tmp_sdv );
+        }
+        
+        /* The floor set date is only selected for debut items and it is the earliest of any of them and only displayed with DEBUT */
+        if( strlen(  fsd_str.arr ) > 0 )
+        {
+            if ( strlen( fsd_str_temp ) )
+            {
+                snprintf(fsd_str_temp,sizeof(fsd_str_temp),"%s", fsd_str.arr );
+            }
+            else
+            {                
+                struct tm date1;
+                struct tm date2;
+                
+                strptime( fsd_str.arr, "%m/%d/%Y", &date1);
+                strptime(fsd_str_temp, "%m/%d/%Y", &date2);
+                
+                tmp_days = difftime(mktime(&date1), mktime(&date2));
+                
+                
+                if ( tmp_days < 0 )
+                {
+                    snprintf(fsd_str_temp,sizeof(fsd_str_temp),"%s", fsd_str.arr );
+                }
+            }
+        }
+        
+        /* The Info VI is the one with the lowest priority */
+        if ( strlen(  info_pri_str.arr ) > 0 )
+        {
+            if ( strlen( info_pri_str_temp ) )
+            {
+                snprintf(info_pri_str_temp,sizeof(info_pri_str_temp),"%s", info_pri_str.arr );
+            }
+            else
+            {
+                snprintf(tmp_arr,sizeof(tmp_arr),"%s", info_pri_str.arr );
+                if ( strcmp(tmp_arr,min_info_pri_str) > 0 && strcmp(tmp_arr,info_pri_str_temp) < 0 )
+                    tem_le = 1;
+                else
+                    tem_le = 0;
+                
+                if ( tem_le == 1 )
+                    snprintf(info_pri_str_temp,sizeof(info_pri_str_temp),"%s", info_pri_str.arr );
+            }
+        }
+    }
+    
+    /* Cursor returns "" when not found */
+    if(strcmp( case_id_db.arr,"") == 0 )
+    {
+        debug("Error select ord_case ");
+        generate_error_label("Unknown case or unknown contents");
+    }
+    
+    if(strcmp( store_name.arr,"") == 0 )
+    {
+        snprintf(temp_msg1,sizeof(temp_msg1),"Unknown store address for store: %s",tonum );
+        debug(temp_msg1);
+    }
+    
+    if(strcmp(div,"") == 0 )
+    {
+        add_msg("Unknown item(s)");
+        error_flag = 1;
+    }
+    
+    put_token( TOK_TONUM, tonum );
+    put_token( TOK_STORE, store );
+    put_token( TOK_TOSTATE, to_state );
+    put_token( TOK_TOADDR1, toaddr1 );
+    put_token( TOK_TOADDR2, toaddr2 );
+    put_token( TOK_TOADDR2C, toaddr2c );
+    put_token( TOK_USER, user );
+    put_token( TOK_DIV, div );   
+    put_token( TOK_PONUM, ponum );
+    put_token( TOK_INBDI, inbdi );
+    put_token( TOK_INBDIFLG, inbdiflg );
+    put_token( TOK_DATE1, date1 );
+    put_token( TOK_ISDATE,  in_store_date.arr );
+    put_token( TOK_ARRIVE_DATE,  arrival_date.arr );
+    put_token( TOK_ARRIVE_MMDD,  arrival_mmdd.arr );
+    put_token( TOK_PRICEIND, price_ind );
+    snprintf(units_fmt,sizeof(units_fmt),"%07d",units );
+    put_token( TOK_UNITS, units_fmt );
+    
+    if ( ft_qty_temp > 0 || af_qty_temp > 0 )
+        put_token( TOK_RI, "FT" );
+    
+    /* RFID code is not displayed if it is "none" */
+    if ( strcmp( rfid_cd.arr,"") != 0 && strcmp( rfid_cd.arr,"N") != 0 )
+    {
+        ap_code_to_str( rfid_status, AP_RFID_STRINGS,  rfid_cd.arr[0], '~' );
+    }
+    else
+    {
+        if ( strlen( rfid_cd.arr) == 0  && strlen( sss_rfid_cd.arr) > 0 && rfid_qty_t > 0 )
+        {
+            if ( strcmp( sss_rfid_cd.arr,"N") != 0 )
+            {
+                ap_code_to_str( rfid_status, AP_RFID_STRINGS,  sss_rfid_cd.arr[0], '~' );
+            }
+            else
+            {
+                if (  rfid_ssc_cases > 0 )
+                    ap_code_to_str( rfid_status, AP_RFID_STRINGS, AP_RFID_REQUIRED, '~' );
+                else
+                    ap_code_to_str( rfid_status, AP_RFID_STRINGS, AP_RFID_PASS, '~' );
+            }
+        }
+    }
+    
+    put_token( TOK_RFID, rfid_status );
+    
+    /* extract the info vi code from the priority info vi string */
+    snprintf(tmp_msg2,sizeof(tmp_msg2),"%s",substr( info_pri_str.arr, QTY_LEN+1, INFO_VI_CD_LEN) );
+    put_token( TOK_INFOVI, tmp_msg2 );
+    put_token( TOK_TEXT1,  sl_msg.arr );
+    
+    if ( strlen(debut_sdv) > 0 )
+    {    
+        put_token( TOK_SDV, debut_sdv ) ;
+        /*put_token( TOK_FLOWSTR, "DEBUT" );
+          put_token( TOK_FSDATE,  fsd_str.arr ); */
+          
+        /* Populate debut indicator and string */
+        put_token( TOK_DEBUTIND, "D" );
+        put_token( TOK_DEBUTSTR, "DEBUT" ) ;
+    }
+    else
+    {
+        if ( strlen(ft_sdv) > 0 )
+            put_token( TOK_SDV, ft_sdv );
+        else
+        {
+            if ( strlen(af_sdv) > 0 )
+                put_token( TOK_SDV, af_sdv );
+            else
+                put_token( TOK_SDV, sdv );
+        }
+    }
+    
+    /* Do not print bar code if an error occurred. */
+    if ( error_flag == 1 )
+    {
+        memset(bcase  ,'\0',sizeof(bcase));
+        memset(bcase12,'\0',sizeof(bcase12));
+        memset(bcase20,'\0',sizeof(bcase20));
+        memset(upca   ,'\0',sizeof(upca));
+    }
+    
+    put_token( TOK_BTYPE, btype );
+    put_token( TOK_BCASE, bcase );
+    put_token( TOK_UPCA, upca );
+    put_token( TOK_XXXCASE, xxxcase );
+    put_token( TOK_CASESTR, casestr );
+    put_token( TOK_CASESTRC, casestrc );
+    put_token( TOK_CASESTRR, casestrr );
+    if (strcmp(xxxctn,"") != 0)
+        put_token( TOK_XXXCTN, xxxctn );
+    if (strcmp(ctnstr,"") != 0)
+        put_token( TOK_CTNSTR, ctnstr ) ;
+    if (strcmp(bcase12,"") != 0)
+        put_token( TOK_BCASE12, bcase12 );
+    put_token( TOK_BCASE20, bcase20 );
+    
+    EXEC SQL CLOSE C;
+}
+
+
+/****************************************************************************
+* Function : put_token                                                      *
+*                                                                           *
+* Store token value pair in array or update existing entrys value in        *
+* the array                                                                 *
+*                                                                           *
+****************************************************************************/
+
+void put_token ( char name[], char value[] )
+{
+    int ii = 0;
+    char token[100];
+    
+    /* If already exists, just update the value */
+    while ( ii < tok_arr_rec )
+    {
+        snprintf(token,sizeof(token),"%s",tok_arr[ii].name );
+        if( strcmp(tok_arr[ii].name,name) == 0 )
+        {
+            snprintf(tok_arr[ii].name,sizeof(tok_arr[ii].name),"%s",token );
+            break;
+        }
+        ii++;
+    }
+    
+    if ( ii == tok_arr_rec )
+    {
+        snprintf(tok_arr[ii].name ,sizeof(tok_arr[ii].name),"%s",name );
+        snprintf(tok_arr[ii].value,sizeof(tok_arr[ii].value),"%s",value );
+        tok_arr_rec ++;
+    }    
+}
+
+
+/****************************************************************************
+* Function : query_gen                                                      *
+*                                                                           *
+* This function build the query string based on the case-flag passed as     *
+* parameter to the program.                                                 *
+*                                                                           *
+****************************************************************************/
+
+void query_gen( )
+{
+    char src_case_id[20 + 1] = "";
+    
+    if ( cases_flag == 'N' )
+        snprintf(src_case_id,sizeof(src_case_id),"%s",case_id);
+    else
+        memset(src_case_id,'\0',sizeof(src_case_id));
+        
+    
+   
+    snprintf(dynstmt.arr,sizeof(dynstmt.arr)," "
+                                "Select case_type,case_id_db,arrival_date,arrival_mmdd,"
+                                "rfid_cd,sss_rfid_cd,price_res,rfid_ssc_cases,store_num,"
+                                "create_dt,create_user_id,rptg_sdv,store_name,address,"
+                                "city_name,state_cd,division,sl_msg,div_descr,div_cnt,"
+                                "po_num,po_cnt,in_store_date,rfid_qty,fsd_str,info_pri_str,"
+                                "qty,debut_qty,ft_qty,af_qty from ("
+                                " SELECT '1' AS case_type,"
+                                " o.case_id AS case_id_db,"
+                                " TO_CHAR( o.arrival_dt, 'MM/DD/YY' ) AS arrival_date, "
+                                " TO_CHAR( o.arrival_dt, 'MM/DD' )    AS arrival_mmdd,"
+                                " o.rfid_cd as rfid_cd,"
+                                " '' AS sss_rfid_cd, "
+                                " NVL(o.price_res,0) AS price_res,"
+                                " -1 AS rfid_ssc_cases ,"
+                                " o.store_num AS  store_num,"
+                                " TO_CHAR( o.create_dt, 'MM/DD/YY HH:MI:SS' ) AS create_dt ,"
+                                " o.create_user_id AS create_user_id ,"
+                                " o.rptg_sdv AS rptg_sdv,"
+                                " o.store_name AS store_name ,"
+                                " o.address AS address,"
+                                " o.city_name AS city_name ,"
+                                " o.state_cd AS state_cd,"
+                                " o.division AS division,"
+                                " o.sl_msg AS sl_msg,"
+                                " o.descr AS div_descr,"
+                                " NVL(o.div_cnt,0) AS div_cnt,"
+                                " o.po_num AS po_num ,"
+                                " NVL(o.po_cnt,0) AS po_cnt ,"
+                                " TO_CHAR( o.in_store_date, 'MM/DD/YY' )  AS in_store_date,"
+                                " NVL( SUM( DECODE( o.rfid_tag_flag, 'Y', o.qty, 0 ) ), 0 )  AS rfid_qty ,"
+                                " MIN( DECODE( o.debut_ind, 'Y', TO_CHAR( o.floor_set_date, 'DD/MM/YY' ), NULL ) ) AS fsd_str ,"
+                                " NVL(MIN( o.info_vi_cd ),0)   AS info_pri_str ,"
+                                " NVL(SUM( o.qty ),0)   AS qty ,"
+                                " NVL( SUM( DECODE( o.debut_ind, 'Y', o.qty, 0 ) ), 0 ) AS debut_qty ,"
+                                " NVL( SUM( DECODE( o.ri_cd, 'FT', o.qty, 0 ) ), 0 ) AS ft_qty ,"
+                                " NVL( SUM( DECODE( o.ri_cd, 'AF', o.qty, 0 ) ), 0 ) AS af_qty"
+                                " from ( "
+                                    "select ox.case_id, "
+                                            "ox.arrival_dt, "
+                                            "ox.rfid_cd, "
+                                            "ox.price_res, "
+                                            "ox.store_num, "
+                                            "ox.create_dt, "
+                                            "ox.create_user_id, "
+                                            "ox.item_num, "
+                                            "ox.division, "
+                                            "ox.sl_msg, "
+                                            "c.descr, "
+                                            "ox.div_cnt, "
+                                            "ox.po_num, "
+                                            "ox.po_cnt, "
+                                            "ox.in_store_date, "
+                                            "ox.rptg_sdv, "
+                                            "ox.info_vi_cd, "
+                                            "ox.ri_cd, "
+                                            "ox.qty, "
+                                            "sa.store_name, "
+                                            "sa.address, "
+                                            "sa.city_name, "
+                                            "sa.state_cd, "
+                                            "si.floor_set_date, "
+                                            "ox.debut_ind, "
+                                            "si.rfid_tag_flag  "
+                                        "from code c, store_address sa, store_item si, "
+                                            "( select os.case_id, "
+                                                    "ocd.item_num, "
+                                                    "ocd.ri_cd, "
+                                                    "os.rfid_cd, "
+                                                    "os.arrival_dt, "
+                                                    "os.price_res, "
+                                                    "os.store_num, "
+                                                    "os.create_dt, "
+                                                    "os.create_user_id, "
+                                                    "os.address_num, "
+                                                    "os.division, "
+                                                    "os.sl_msg, "
+                                                    "os.div_cnt, "
+                                                    "os.po_num, "
+                                                    "os.po_cnt, "
+                                                    "os.in_store_date, "
+                                                    "i.rptg_sdv, "
+                                                    "LPAD( TO_CHAR(vi.prrty), 9, ' ' ) || vi.info_vi_cd info_vi_cd, "
+                                                    "MAX( DECODE( od.flow_vi_cd, 'D', 'Y', 'N' ) ) debut_ind, "
+                                                    "SUM( ocd.qty ) qty  "
+                                                "from item i, info_vi_prty vi, ord_detail od, ord_case_detail ocd, "
+                                                    "( select oc.case_id, "
+                                                            "oc.rfid_cd, "
+                                                            "ci.arrival_dt, "
+                                                            "ci.price_res, "
+                                                            "oc.store_num, "
+                                                            "oc.create_dt, "
+                                                            "oc.create_user_id, "
+                                                            "oc.division, "
+                                                            "oc.sl_msg, "
+                                                            "oc.div_cnt, "
+                                                            "oc.po_num, "
+                                                            "oc.po_cnt, "
+                                                            "oc.in_store_date, "
+                                                            "MIN( sa.address_num ) address_num  "
+                                                        "from store_address sa, "
+                                                            "( select oc.case_id, "
+                                                                        "oc.src_case_id, "
+                                                                        "oc.rfid_cd, "
+                                                                        "oc.store_num, "
+                                                                        "oc.create_dt, "
+                                                                        "oc.create_user_id, "
+                                                                        "orx.division, "
+                                                                        "oow.sl_msg, "
+                                                                        "COUNT( DISTINCT i.division ) div_cnt, "
+                                                                        "MIN( o.po_num ) po_num, "
+                                                                        "COUNT( DISTINCT o.po_num ) po_cnt, "
+                                                                        "MIN( o.in_store_date ) in_store_date  "
+                                                                "from ord o, item i, ord_case_detail ocd, ord_case oc, "
+                                                                        "( select x.case_id, "
+                                                                                "x.division  "
+                                                                            "from ( select od.case_id, "
+                                                                                        "od.division, "
+                                                                                        "dense_rank() "
+                                                                                        "over( partition by od.case_id order by od.cnt desc, od.division asc ) rnk  "
+                                                                                    "from ( select ocd.case_id, "
+                                                                                                "i.division, "
+                                                                                                "count(*) cnt "
+                                                                                            "from item i, ord_case_detail ocd "
+                                                                                            "where ocd.item_num = i.item_num(+) "
+                                                                                            "and ocd.case_id = '%s'  "
+                                                                                            "and '%c' = 'N'  "
+                                                                                        "group by ocd.case_id, "
+                                                                                                    "i.division ) od "
+                                                                                ") x  "
+                                                                        "where x.rnk = 1 "
+                                                                        ") orx, "
+                                                                        "(  select ow.case_id, "
+                                                                                "ow.sl_msg  "
+                                                                            "from ( SELECT w.case_id, "
+                                                                                        "w.sl_msg, "
+                                                                                        "w.pref, "
+                                                                                        "w.tot_qty, "
+                                                                                        "w.min_sdv_lot, "
+                                                                                        "DENSE_RANK() OVER( ORDER BY w.pref ASC, "
+                                                                                                                    "w.tot_qty DESC, "
+                                                                                                                    "w.min_sdv_lot ASC ) drank  "
+                                                                                    "FROM ( SELECT ocd.case_id, "
+                                                                                                    "NVL(wsl.svl_text_1, ws.svl_text_1 ) sl_msg, "
+                                                                                                    "MIN( DECODE( wsl.svl_text_1, Null, 2, 1 ) ) pref, "
+                                                                                                    "MIN( DECODE( wsl.svl_text_1, "
+                                                                                                                "Null, ws.rptg_sdv, "
+                                                                                                                "wsl.item_sdv || wsl.item_lot ) ) min_sdv_lot, "
+                                                                                                    "SUM( ocd.qty ) tot_qty  "
+                                                                                            "FROM whse_sdv_lot wsl, whse_sdv ws, ord_case_detail ocd  "
+                                                                                            "WHERE ocd.case_id = '%s'  "
+                                                                                                "and '%c' = 'N' "
+                                                                                                "AND SUBSTR( ocd.item_num, 1, 5 ) = ws.item_whse "
+                                                                                                "AND SUBSTR( ocd.item_num, (5+1), "
+                                                                                                            "3 ) = ws.rptg_sdv "
+                                                                                                "AND SUBSTR( ocd.item_num, 1, 5 ) = wsl.item_whse(+) "
+                                                                                                "AND SUBSTR( ocd.item_num, (5+1), "
+                                                                                                            "3 ) = wsl.item_sdv(+)  "
+                                                                                                "AND SUBSTR( ocd.item_num, (8+1), "
+                                                                                                            "4 )  = wsl.item_lot(+)  "
+                                                                                        "GROUP BY ocd.case_id, "
+                                                                                                    "NVL(wsl.svl_text_1, ws.svl_text_1 ) "
+                                                                                        ") w "
+                                                                                ") ow  "
+                                                                            "where ow.drank = 1 "
+                                                                        ") oow  "
+                                                                "where oc.case_id = orx.case_id  "
+                                                                    "and oc.case_id = oow.case_id  "
+                                                                    "and oc.case_id = ocd.case_id  "
+                                                                    "and ocd.ord_id = o.ord_id  "
+                                                                    "and ocd.item_num = i.item_num(+) "
+                                                            "group by oc.case_id, "
+                                                                        "oc.src_case_id, "
+                                                                        "oc.rfid_cd, "
+                                                                        "oc.store_num, "
+                                                                        "oc.create_dt, "
+                                                                        "oc.create_user_id, "
+                                                                        "orx.division, "
+                                                                        "oow.sl_msg "
+                                                            ") oc, "
+                                                            "( select cx.case_id, "
+                                                                        "cx.arrival_dt,  "
+                                                                        "MIN( DECODE( BITAND( NVL( cx.inspect_mask, NVL( sd.inspect_mask, 0 ) ), 1 ), "
+                                                                                    "1, 0, 1 ) ) price_res  "
+                                                                "from shipment_sdv sd, "
+                                                                        "(  Select DISTINCT "
+                                                                                "cc.case_id, "
+                                                                                "cc.arrival_dt, "
+                                                                                "cc.rfid_cd, "
+                                                                                "DECODE( cc.rcp_inspect_dt, Null, ss.inspect_mask, cc.inspect_mask ) inspect_mask, "
+                                                                                "er.mfg_num, "
+                                                                                "er.hawb_num, "
+                                                                                "er.item_sdv, "
+                                                                                "w.unit_num, "
+                                                                                "ss.rfid_cd ss_rfid_cd "
+                                                                            "from whse w, shipment_sdv ss, exp_receipt er, case_content cc "
+                                                                            "where cc.case_id = '%s'  "
+                                                                            "and '%c' = 'N' "
+                                                                            "and cc.units > 0 "
+                                                                            "and cc.receipt_num = er.exp_receipt_num "
+                                                                            "and er.item_whse = w.item_whse(+) "
+                                                                            "and cc.orig_shipment_num = ss.shipment_num(+) "
+                                                                            "and cc.orig_sup_num = ss.sup_num(+) "
+                                                                            "and SUBSTR( cc.item_num, 5+1, 3 ) = ss.item_sdv(+) "
+                                                                            "AND cc.orig_unit_num = ss.unit_num(+) "
+                                                                            "and cc.orig_container = ss.container(+) "
+                                                                            "and cc.orig_carrier_num = ss.carrier_num(+) "
+                                                                        ") cx "
+                                                                "where cx.hawb_num = sd.shipment_num(+) "
+                                                                    "and cx.mfg_num = sd.sup_num(+) "
+                                                                    "and cx.item_sdv = sd.item_sdv(+) "
+                                                                    "and cx.unit_num = sd.unit_num(+) "
+                                                                    "and sd.container(+) IS Null "
+                                                                    "and sd.carrier_num(+) IS Null "
+                                                                "group by cx.case_id, "
+                                                                        "cx.arrival_dt "
+                                                            ") ci "
+                                                        "where oc.store_num = sa.store_num (+)  "
+                                                        "and oc.src_case_id = ci.case_id(+) "
+                                                    "group by oc.case_id, "
+                                                            "oc.rfid_cd, "
+                                                            "ci.arrival_dt, "
+                                                            "ci.price_res, "
+                                                            "oc.store_num, "
+                                                            "oc.create_dt, "
+                                                            "oc.create_user_id, "
+                                                            "oc.division, "
+                                                            "oc.sl_msg, "
+                                                            "oc.div_cnt, "
+                                                            "oc.po_num, "
+                                                            "oc.po_cnt, "
+                                                            "oc.in_store_date "
+                                                    ") os "
+                                                "where os.case_id = ocd.case_id "
+                                                "and ocd.ord_id = od.ord_id "
+                                                "and ocd.item_num = od.item_num "
+                                                "and ocd.info_vi_cd = vi.info_vi_cd(+) "
+                                                "and ocd.item_num = i.item_num(+) "
+                                            "group by os.case_id, "
+                                                    "ocd.item_num, "
+                                                    "ocd.ri_cd, "
+                                                    "os.rfid_cd, "
+                                                    "os.arrival_dt, "
+                                                    "os.price_res, "
+                                                    "os.store_num, "
+                                                    "os.create_dt, "
+                                                    "os.create_user_id, "
+                                                    "os.address_num, "
+                                                    "os.division, "
+                                                    "os.sl_msg, "
+                                                    "os.div_cnt, "
+                                                    "os.po_num, "
+                                                    "os.po_cnt, "
+                                                    "os.in_store_date, "
+                                                    "i.rptg_sdv, "
+                                                    "LPAD( TO_CHAR(vi.prrty), 9, ' ' ) || vi.info_vi_cd "
+                                            ") ox "
+                                    "where ox.store_num = sa.store_num(+) "
+                                        "and ox.address_num = sa.address_num(+) "
+                                        "and ox.item_num = si.item_num(+) "
+                                        "and ox.store_num = si.store_num(+) "
+                                        "and ox.division = c.code(+) "
+                                        "and c.code_type_cd(+) = 'DIVISN' "
+                                    ") o "
+                                "group by o.case_id, "
+                                        "TO_CHAR( o.arrival_dt, 'MM/DD/YY' ), "
+                                        "TO_CHAR( o.arrival_dt, 'MM/DD' ), "
+                                        "o.arrival_dt, "
+                                        "o.rfid_cd, "
+                                        "Null, "
+                                        "o.price_res, "
+                                        "o.store_num, "
+                                        "o.create_dt, "
+                                        "o.create_user_id, "
+                                        "o.rptg_sdv, "
+                                        "o.store_name, "
+                                        "o.address, "
+                                        "o.city_name, "
+                                        "o.state_cd, "
+                                        "o.division, "
+                                        "o.sl_msg, "
+                                        "o.descr, "
+                                        "o.div_cnt, "
+                                        "o.po_num, "
+                                        "o.po_cnt, "
+                                        "TO_CHAR( o.in_store_date, 'MM/DD/YY' ) "
+                                "union "
+                                "SELECT '2' AS case_type,"
+                                "o.case_id AS case_id_db ,"
+                                " TO_CHAR( o.arrival_dt, 'MM/DD/YY' ) AS arrival_date,"
+                                " TO_CHAR( o.arrival_dt, 'MM/DD' ) AS arrival_mmdd,"
+                                " o.rfid_cd AS rfid_cd,"
+                                " o.sss_rfid_cd  AS  sss_rfid_cd,"
+                                " NVL(o.price_res,0)   AS  price_res,"
+                                " NVL(o.rfid_ssc_cases,0) AS rfid_ssc_cases,"
+                                " o.store_num as store_num,"
+                                " '' AS create_dt,"
+                                " '' AS create_user_id,"
+                                " o.rptg_sdv    as rptg_sdv,"
+                                " o.store_name  as store_name,"
+                                " o.address     as address   ,"
+                                " o.city_name   as city_name ,"
+                                " o.state_cd    as state_cd  ,"
+                                " o.division    as division  ,"
+                                " o.sl_msg      as sl_msg    ,"
+                                " o.descr       as div_descr ,"
+                                " NVL(o.div_cnt    ,0) as div_cnt   ,"
+                                " o.min_di      as po_num    ,"
+                                " NVL(o.cnt_di     ,0) as po_cnt    ,"
+                                " TO_CHAR( o.in_store_date, 'MM/DD/YY' )   AS in_store_date,"
+                                " NVL( SUM( DECODE( o.rfid_tag_flag, 'Y', o.units, 0 ) ), 0 ) AS rfid_qty, "
+                                " MIN( DECODE( o.debut_ind, 'Y', TO_CHAR( o.floor_set_date, 'MF' ), ' ' ) ) AS fsd_str,"
+                                " MIN( o.info_vi_cd ) AS info_pri_str ,"
+                                " SUM( o.units ) AS qty, "
+                                " NVL( SUM( DECODE( o.debut_ind, 'Y', o.units, 0 ) ), 0 ) AS debut_qty, "
+                                " NVL( SUM( DECODE( o.ri_cd, 'FT', o.units, 0 ) ), 0 ) AS ft_qty , "
+                                " NVL( SUM( DECODE( o.ri_cd, 'AF', o.units, 0 ) ), 0 ) AS af_qty"
+                                " from ( select cs.case_id, "
+                                            "cs.arrival_dt, "
+                                            "cs.rfid_cd, "
+                                            "cs.sss_rfid_cd, "
+                                            "cs.price_res, "
+                                            "cs.rfid_ssc_cases, "
+                                            "cs.rptg_sdv, "
+                                            "cs.item_num, "
+                                            "cs.ri_cd, "
+                                            "cs.info_vi_cd, "
+                                            "cs.units, "
+                                            "cs.min_di, "
+                                            "cs.cnt_di, "
+                                            "cs.store_num, "
+                                            "cs.store_cnt, "
+                                            "cs.division, "
+                                            "cs.sl_msg, "
+                                            "c.descr, "
+                                            "cs.div_cnt, "
+                                            "cs.in_store_date, "
+                                            "cs.debut_ind, "
+                                            "si.floor_set_date, "
+                                            "DECODE( si.rfid_tag_flag, 'Y', si.rfid_tag_flag, cs.rfid_tag_flag ) rfid_tag_flag, "
+                                            "sa.store_name, "
+                                            "sa.city_name, "
+                                            "sa.state_cd, "
+                                            "sa.address "
+                                        "from code c, store_address sa, store_item si, "
+                                            "( select cc.case_id, "
+                                                    "cc.arrival_dt, "
+                                                    "cd.rfid_cd, "
+                                                    "cd.sss_rfid_cd, "
+                                                    "cd.price_res, "
+                                                    "cd.rfid_ssc_cases, "
+                                                    "i.rptg_sdv, "
+                                                    "i.rfid_tag_flag, "
+                                                    "cc.item_num, "
+                                                    "cc.ri_cd, "
+                                                    "lpad( to_char( vi.prrty), 9, ' ') || vi.info_vi_cd info_vi_cd, "
+                                                    "cc.units, "
+                                                    "cd.min_di, "
+                                                    "cd.cnt_di, "
+                                                    "cd.stmf_store_num, "
+                                                    "cd.store_num, "
+                                                    "cd.store_cnt, "
+                                                    "cd.division, "
+                                                    "cd.sl_msg, "
+                                                    "cd.div_cnt, "
+                                                    "cdb.debut_ind, "
+                                                    "cd.in_store_date, "
+                                                    "MIN( sa.address_num ) address_num "
+                                                "from store_address sa, item i, info_vi_prty vi, case_content cc, "
+                                                    "( select cc.case_id, "
+                                                                "crx.division, "
+                                                                "crw.sl_msg, "
+                                                                "oisd.in_store_date, "
+                                                                "ci.rfid_cd, "
+                                                                "ci.sss_rfid_cd, "
+                                                                "ci.price_res, "
+                                                                "ci.rfid_ssc_cases, "
+                                                                "COUNT( DISTINCT i.division ) div_cnt, "
+                                                                "COUNT( DISTINCT DECODE( er.type_cd, 'S', er.store_num, er.item_whse ) ) store_cnt, "
+                                                                "MIN( er.rel_order_num ) min_di, "
+                                                                "COUNT( DISTINCT rel_order_num ) cnt_di, "
+                                                                "MIN( DECODE( er.type_cd, 'S', er.store_num, Null ) ) stmf_store_num, "
+                                                                "MIN( DECODE( er.type_cd, 'S', er.store_num, er.item_whse ) ) store_num "
+                                                        "from item i, exp_receipt er, case_content cc, "
+                                                                "( select x.case_id, "
+                                                                        "x.division "
+                                                                    "from ( select cd.case_id, "
+                                                                                "cd.division, "
+                                                                                "dense_rank() "
+                                                                                    "over( partition by cd.case_id order by cd.cnt desc, cd.division asc ) rnk "
+                                                                            "from ( select cc.case_id, "
+                                                                                        "i.division, "
+                                                                                        "count(*) cnt "
+                                                                                    "from item i, case_content cc "
+                                                                                    "where cc.item_num = i.item_num(+) "
+                                                                                    "and cc.case_id = '%s'  "
+                                                                                    "and '%c' = 'Y' "
+                                                                                    "and cc.units > 0 "
+                                                                                "group by cc.case_id, "
+                                                                                        "i.division "
+                                                                                ") cd "
+                                                                        ") x "
+                                                                "where x.rnk = 1 "
+                                                                ") crx, "
+                                                                "( select rw.case_id, "
+                                                                        "rw.sl_msg "
+                                                                    "from ( SELECT w.case_id, "
+                                                                                "w.sl_msg, "
+                                                                                "w.pref, "
+                                                                                "w.tot_qty, "
+                                                                                "w.min_sdv_lot, "
+                                                                                "DENSE_RANK() OVER( ORDER BY w.pref ASC, w.tot_qty DESC, w.min_sdv_lot ASC ) drank "
+                                                                            "FROM ( SELECT cc.case_id, "
+                                                                                        "NVL(wsl.svl_text_1, ws.svl_text_1 ) sl_msg, "
+                                                                                        "MIN( DECODE( wsl.svl_text_1, Null, 2, 1 ) ) pref, "
+                                                                                        "MIN( DECODE( wsl.svl_text_1, "
+                                                                                                        "Null, ws.rptg_sdv, "
+                                                                                                        "wsl.item_sdv || wsl.item_lot ) ) min_sdv_lot, "
+                                                                                        "SUM( cc.units ) tot_qty "
+                                                                                    "FROM whse_sdv_lot wsl, whse_sdv ws, case_content cc "
+                                                                                    "WHERE cc.case_id = '%s'  "
+                                                                                    "AND cc.units > 0 "
+                                                                                    "AND SUBSTR( cc.item_num, 1, 5 ) = ws.item_whse "
+                                                                                    "AND SUBSTR( cc.item_num, (5+1), 3 ) = ws.rptg_sdv "
+                                                                                    "AND SUBSTR( cc.item_num, 1, 5 ) = wsl.item_whse(+) "
+                                                                                    "AND SUBSTR( cc.item_num, (5+1), "
+                                                                                                "3 ) = wsl.item_sdv(+) "
+                                                                                    "AND SUBSTR( cc.item_num, (8+1), "
+                                                                                                "4 )  = wsl.item_lot(+) "
+                                                                                "GROUP BY cc.case_id, "
+                                                                                        "NVL(wsl.svl_text_1, ws.svl_text_1 ) "
+                                                                                ") w "
+                                                                        ") rw "
+                                                                "where rw.drank = 1 "
+                                                                ") crw,  "
+                                                                "( select cx.case_id, "
+                                                                        "MIN( cx.rfid_cd ) rfid_cd, "
+                                                                        "MIN( DECODE( BITAND( NVL( cx.inspect_mask, sd.inspect_mask), 1 ), 1, 0, 1 ) ) price_res,  "
+                                                                        "DECODE( COUNT( NVL( cx.ss_rfid_cd, sd.rfid_cd ) ), "
+                                                                                "0, DECODE( NVL( MAX( ss.rfid_ssc_cases ), NVL(MAX(s.rfid_ssc_cases), 0) ), "
+                                                                                            "0, 'V', 'I' ), "
+                                                                                "DECODE( MIN( DECODE( NVL( cx.ss_rfid_cd, sd.rfid_cd ), "
+                                                                                                    "'F', 1, "
+                                                                                                    "'I', 2, "
+                                                                                                    "'V', 3, "
+                                                                                                    "4 ) ), "
+                                                                                        "1, 'F', "
+                                                                                        "2, 'I', "
+                                                                                        "3, 'V', "
+                                                                                        "'N' ) ) sss_rfid_cd, "
+                                                                        "NVL( MAX( ss.rfid_ssc_cases ), NVL( MAX( s.rfid_ssc_cases ), 0 ) ) rfid_ssc_cases "
+                                                                    "from supplier_sdv ss, supplier s, shipment_sdv sd, "
+                                                                        "( Select DISTINCT "
+                                                                                "cc.case_id, "
+                                                                                "cc.rfid_cd, "
+                                                                                "DECODE( cc.rcp_inspect_dt, Null, ss.inspect_mask, cc.inspect_mask ) inspect_mask, "
+                                                                                "er.mfg_num, "
+                                                                                "er.hawb_num, "
+                                                                                "er.item_sdv, "
+                                                                                "w.unit_num, "
+                                                                                "ss.rfid_cd ss_rfid_cd "
+                                                                            "from whse w, shipment_sdv ss, exp_receipt er, case_content cc "
+                                                                            "where cc.case_id = '%s' "
+                                                                            "and '%c' = 'Y'  "
+                                                                            "and cc.units > 0 "
+                                                                            "and cc.receipt_num = er.exp_receipt_num "
+                                                                            "and er.item_whse = w.item_whse(+) "
+                                                                            "and cc.orig_shipment_num = ss.shipment_num(+) "
+                                                                            "and cc.orig_sup_num = ss.sup_num(+) "
+                                                                            "and SUBSTR( cc.item_num, 5+1, 3 ) = ss.item_sdv(+) "
+                                                                            "AND cc.orig_unit_num = ss.unit_num(+) "
+                                                                            "and cc.orig_container = ss.container(+) "
+                                                                            "and cc.orig_carrier_num = ss.carrier_num(+) "
+                                                                        ") cx "
+                                                                "where cx.hawb_num = sd.shipment_num(+) "
+                                                                    "and cx.mfg_num = sd.sup_num(+) "
+                                                                    "and cx.item_sdv = sd.item_sdv(+) "
+                                                                    "and cx.unit_num = sd.unit_num(+) "
+                                                                    "and sd.container(+) IS Null "
+                                                                    "and sd.carrier_num(+) IS Null "
+                                                                    "and cx.mfg_num = s.sup_num(+) "
+                                                                    "and cx.mfg_num = ss.sup_num(+) "
+                                                                    "and cx.item_sdv = ss.item_sdv(+) "
+                                                                "group by cx.case_id "
+                                                                ") ci, "
+                                                                "( select x.case_id, "
+                                                                        "MIN( o.in_store_date ) in_store_date "
+                                                                    "from ord o, ord_detail od, ord_batch ob,  "
+                                                                        "( select cc.case_id, "
+                                                                                "cc.item_num, "
+                                                                                "er.type_cd, "
+                                                                                "er.rel_order_num, "
+                                                                                "DECODE( er.type_cd, 'S', er.store_num, er.item_whse ) store_num  "
+                                                                            "from exp_receipt er, case_content cc "
+                                                                            "where cc.case_id = '%s' "
+                                                                            "and '%c' = 'Y' "
+                                                                            "and cc.units > 0 "
+                                                                            "and cc.receipt_num = er.exp_receipt_num "
+                                                                        ") x "
+                                                                "where o.ord_num = x.rel_order_num "
+                                                                    "and o.store_num = x.store_num "
+                                                                    "and o.item_whse = SUBSTR( x.item_num, 1, 5 ) "
+                                                                    "and o.active_flag = 'Y' "
+                                                                    "and DECODE( o.type_cd, "
+                                                                                "'S', 'S', "
+                                                                                "'D',   'B', "
+                                                                                "'F', 'B', "
+                                                                                "null ) = x.type_cd "
+                                                                    "and o.ord_id = od.ord_id "
+                                                                    "and od.item_num = x.item_num "
+                                                                    "and od.ord_batch_num = ob.ord_batch_num "
+                                                                "group by x.case_id "
+                                                                ") oisd "
+                                                        "where crx.case_id = oisd.case_id(+) "
+                                                            "and crx.case_id = ci.case_id(+) "
+                                                            "and crx.case_id = cc.case_id "
+                                                            "and crw.case_id = cc.case_id "
+                                                            "and cc.case_id = '%s' "
+                                                            "and '%c' = 'Y' "
+                                                            "and cc.units > 0 "
+                                                            "and cc.receipt_num = er.exp_receipt_num(+) "
+                                                            "and cc.item_num = i.item_num(+) "
+                                                    "group by cc.case_id, "
+                                                                "crx.division, "
+                                                                "crw.sl_msg, "
+                                                                "oisd.in_store_date, "
+                                                                "ci.rfid_cd, "
+                                                                "ci.sss_rfid_cd, "
+                                                                "ci.price_res, "
+                                                                "ci.rfid_ssc_cases "
+                                                    ") cd, "
+                                                    "( select x.case_id, "
+                                                                "x.item_num, "
+                                                                "MAX( DECODE( od.flow_vi_cd, 'D', 'Y', 'N' ) ) debut_ind "
+                                                        "from ord o, ord_detail od, ord_batch ob,  "
+                                                                        "( select cc.case_id, "
+                                                                                "cc.item_num, "
+                                                                                "er.type_cd, "
+                                                                                "er.rel_order_num, "
+                                                                                "DECODE( er.type_cd, 'S', er.store_num, er.item_whse ) store_num  "
+                                                                            "from exp_receipt er, case_content cc "
+                                                                            "where cc.case_id = '%s' "
+                                                                            "and '%c' = 'Y' "
+                                                                            "and cc.units > 0 "
+                                                                            "and cc.receipt_num = er.exp_receipt_num "
+                                                                        ") x "
+                                                        "where o.ord_num = x.rel_order_num "
+                                                            "and o.store_num = x.store_num "
+                                                            "and o.item_whse = SUBSTR( x.item_num, 1, 5 ) "
+                                                            "and o.active_flag = 'Y' "
+                                                            "and DECODE( o.type_cd, "
+                                                                        "'S', 'S', "
+                                                                        "'D',   'B', "
+                                                                        "'F', 'B', "
+                                                                        "null ) = x.type_cd "
+                                                            "and o.ord_id = od.ord_id "
+                                                            "and od.item_num = x.item_num "
+                                                            "and od.ord_batch_num = ob.ord_batch_num "
+                                                    "group by x.case_id, "
+                                                                "x.item_num "
+                                                    ") cdb "
+                                                "where cd.case_id = cc.case_id "
+                                                "and cc.case_id = '%s' "
+                                                "and '%c' = 'Y' "
+                                                "and cc.info_vi_cd = vi.info_vi_cd(+) "
+                                                "and cc.item_num = i.item_num(+) "
+                                                "and cd.store_num = sa.store_num(+) "
+                                                "and cdb.case_id(+) = cc.case_id  "
+                                                "and cdb.item_num(+) = cc.item_num "
+                                            "group by cc.case_id, "
+                                                    "cc.arrival_dt, "
+                                                    "cd.rfid_cd, "
+                                                    "cd.sss_rfid_cd, "
+                                                    "cd.price_res, "
+                                                    "cd.rfid_ssc_cases, "
+                                                    "i.rptg_sdv, "
+                                                    "i.rfid_tag_flag, "
+                                                    "cc.item_num, "
+                                                    "cc.ri_cd, "
+                                                    "lpad( to_char( vi.prrty), 9, ' ') || vi.info_vi_cd, "
+                                                    "cc.units, "
+                                                    "cd.min_di, "
+                                                    "cd.cnt_di, "
+                                                    "cd.stmf_store_num, "
+                                                    "cd.store_num, "
+                                                    "cd.store_cnt, "
+                                                    "cd.division, "
+                                                    "cd.sl_msg, "
+                                                    "cd.div_cnt, "
+                                                    "cdb.debut_ind, "
+                                                    "cd.in_store_date "
+                                            ") cs "
+                                        "where cs.stmf_store_num = si.store_num(+) "
+                                        "and cs.item_num = si.item_num(+) "
+                                        "and cs.store_num = sa.store_num(+) "
+                                        "and cs.address_num = sa.address_num(+) "
+                                        "and cs.division = c.code(+) "
+                                        "and c.code_type_cd(+) = 'DIVISN' "
+                                    ") o  "
+                                "group by o.case_id, "
+                                        "TO_CHAR( o.arrival_dt, 'MM/DD/YY' ), "
+                                        "TO_CHAR( o.arrival_dt, 'MM/DD' ),  "
+                                        "o.rfid_cd, "
+                                        "o.sss_rfid_cd, "
+                                        "o.price_res, "
+                                        "o.rfid_ssc_cases, "
+                                        "o.store_num, "
+                                        "Null, "
+                                        "Null, "
+                                        "o.rptg_sdv, "
+                                        "o.store_name, "
+                                        "o.address, "
+                                        "o.city_name, "
+                                        "o.state_cd, "
+                                        "o.division, "
+                                        "o.sl_msg, "
+                                        "o.descr, "
+                                        "o.div_cnt, "
+                                        "o.min_di, "
+                                        "o.cnt_di, "
+                                        "TO_CHAR( o.in_store_date, 'MM/DD/YY' ) "
+                                "order by 1 )", SUBSTITUTE);
+      dynstmt.len = strlen(dynstmt.arr); 
+    
+}
+
+
+/****************************************************************************
+* Function : get_syspar                                                     *
+*                                                                           *
+* This function fetch the system parameter from the sys_parameter table.    *
+*                                                                           *
+****************************************************************************/
+
+void get_syspar ( char name[], char *value )
+{
+    char log_msg[MAX_STR];
+    
+    EXEC SQL BEGIN DECLARE SECTION;
+        varchar value_db[40];
+        varchar name_db [40];
+    EXEC SQL END DECLARE SECTION;
+    
+    memset(value_db.arr,'\0',sizeof(value_db.arr));
+    
+    snprintf(name_db.arr,sizeof(name_db.arr),"%s",name );
+    name_db.len = strlen(name_db.arr);
+    
+    EXEC SQL SELECT param_value
+                    INTO :value_db
+                FROM SYS_PARAMETER
+                WHERE param_name =:name_db;
+             
+    value_db.len = strlen(value_db.arr);
+    
+    
+    if (sqlca.sqlcode == 0)
+    {
+        snprintf(log_msg,MAX_STR,"get_syspar(%s):fetch from SYS_PARAMETER success value_db:%s|\n",name,value_db.arr);
+        debug(log_msg);
+        sprintf(value,"%s",value_db.arr);
+    }
+    else
+    {
+        snprintf(log_msg,MAX_STR,"get_syspar(%s):SQL Error SYS_PARAMETER-%s\n",name,sqlca.sqlerrm.sqlerrmc);
+        debug(log_msg);
+        sprintf(value,"%s","");
+    }
+}
+
+
+/****************************************************************************
+* Function : process_format_line                                            *
+*                                                                           *
+* This function is called by cp_write_label.                                *
+*                                                                           *
+****************************************************************************/
+
+
+void process_format_line( char format_line[] )
+{
+    char cp_tmp_str[MAX_STR]       = "";
+    char cp_sub1[MAX_STR]          = "";
+    char cp_token[MAX_STR]         = "";
+    char cp_sub2[MAX_STR]          = "";
+    char cp_token_str[MAX_STR + 1] = "";
+
+    snprintf(cp_sub1,sizeof(cp_sub1),"%s", str_split(1,format_line,token_delimiter));
+    snprintf(cp_token,sizeof(cp_token),"%s",str_split(2,format_line,token_delimiter));
+    snprintf(cp_sub2,sizeof(cp_sub2),"%s",str_split(3,format_line,token_delimiter));
+    
+    if ( strcmp(cp_token,"") != 0 )
+    {
+        get_token_str ( cp_token, format_line, cp_token_str );
+        /* Only write the line if the token had a value */
+        if ( strcmp(cp_token_str,"") != 0 )
+            snprintf(cp_tmp_str, sizeof(cp_tmp_str), "%s%s%s%c", cp_sub1, cp_token_str, cp_sub2,CRLF);
+    }
+    else
+    {
+        snprintf(cp_tmp_str, sizeof(cp_tmp_str), "%s%c", cp_sub1,CRLF);
+    }
+    
+    if ( strcmp(cp_tmp_str,"") != 0 )
+    {
+        if( first_print == 1 )
+        {
+            /* fprintf(labelfile,"%s",cp_tmp_str); */
+            insert( cp_tmp_str,current_line);
+            first_print = 0;
+            current_line++;
+        }
+        else
+        {
+            /* fprintf(labelfile,"%s",cp_tmp_str); */
+            insert( cp_tmp_str,current_line);
+            current_line++;
+        }        
+    }
+}
+
+/****************************************************************************
+* Function : get_token_str                                                  *
+*                                                                           *
+* Get the string associated with the token or if this is a special token do *
+* alternate processing on the format line                                   *
+*                                                                           *
+****************************************************************************/
+
+void get_token_str( char token[], char format_line[], char *token_str )
+{
+    int skip_just  = 0;             /* Flag controls whether this token will be formatted with justification */
+    int skip_width = 0;             /* Flag controls whether this token will be affected by field width      */
+    int padLen     = 0;
+    //
+    int width      = 0;
+    int len        = 0;
+    //char just_cd   = JUST_NONE;
+    char value[100]      = "" ;
+    char tmp1[MAX_WIDTH] = "";
+    char tmp2[MAX_WIDTH] = "";
+    char pos [MAX_WIDTH] = "";
+    
+    /* This section handles tokens that require special processing */
+    
+    if (strcmp(token,TOK_CFGFILE) == 0 )
+    {
+        snprintf(value,sizeof(value),"%s",get_token( token));
+        if ( strcmp(value,"") != 0 )
+            insert_file( value );        
+    }
+    else if (strcmp(token,TOK_DVPOS) == 0 )
+    {
+        /* Detail Vertical Position */
+        snprintf(tmp1,sizeof(tmp1),"%s",str_split(1,format_line,token_delimiter));
+        snprintf(tmp2,sizeof(tmp2),"%s",str_split(2,format_line,token_delimiter));
+        snprintf(pos,sizeof(pos),"%s",str_split(3,format_line,token_delimiter));
+        DVPOS = atoi(pos);
+    }
+    else if (strcmp(token,TOK_DVINC) == 0 )
+    {
+        /* Detail Vertical Increment Token */
+        snprintf(tmp1,sizeof(tmp1),"%s",str_split(1,format_line,token_delimiter));
+        snprintf(tmp2,sizeof(tmp2),"%s",str_split(2,format_line,token_delimiter));
+        snprintf(pos,sizeof(pos),"%s",str_split(3,format_line,token_delimiter));
+        DVINC = atoi(pos);
+    }
+    else if (strcmp(token,TOK_DVADD) == 0 )
+    {
+        /* Add this amount to vertical position */
+        snprintf(tmp1,sizeof(tmp1),"%s",str_split(1,format_line,token_delimiter));
+        snprintf(tmp2,sizeof(tmp2),"%s",str_split(2,format_line,token_delimiter));
+        snprintf(pos,sizeof(pos),"%s",str_split(3,format_line,token_delimiter));
+        DVADD = atoi(pos);
+    }
+    else if (strcmp(token,TOK_DVFLD) == 0 )
+    {
+        /* Detail field number Token (for Monarch printers) */
+        snprintf(tmp1,sizeof(tmp1),"%s",str_split(1,format_line,token_delimiter));
+        snprintf(tmp2,sizeof(tmp2),"%s",str_split(2,format_line,token_delimiter));
+        snprintf(pos, sizeof(pos) ,"%s",str_split(3,format_line,token_delimiter));
+        DVFLD = atoi(pos);
+    }
+    else if (strcmp(token,"NOINC") == 0 )
+    {
+        auto_inc_flag = FALSE;
+    }
+    
+    /* We ll take the next error message from the array each time we find this token       !
+    !  EMSG1 - and center it on the label by padding with spaces on both sides             !
+    !  MSG   - unadulturated                                                              */
+    
+    else if (strcmp(token,TOK_MSG) == 0 || strcmp(token,TOK_EMSG1) == 0 )
+    {
+        if ( msg_array_index < msg_arr_rec )
+        {
+            snprintf(token_str,MAX_STR,"%s",msg_arr[msg_array_index] );
+            
+            if (strcmp(token,TOK_EMSG1) == 0 )
+            {
+                snprintf(token_str,MAX_STR,"%s",substr(token_str,1,EMSG1_LEN) );
+                padLen =  (EMSG1_LEN - strlen( token_str )) / 2  + strlen( token_str );
+                snprintf(token_str,MAX_STR,"%s",lpad(token_str, padLen, ' ') );
+                snprintf(token_str,MAX_STR,"%s",rpad(token_str, EMSG1_LEN, ' ') );
+            }
+            msg_array_index ++;
+            DVPOS += DVINC;
+        }
+    }
+    else if (strcmp(token,TOK_CRLF) == 0 )
+    {
+        /* Comtec requires lines to be terminated with carriage return and line feed
+           If this token is present then it is assigned here otherwise it is null.     */
+        CRLF = 13;
+        snprintf(tmp1,sizeof(tmp1),"%c",CRLF);
+        put_token( TOK_CRLF, tmp1 );
+    }
+    else if (strcmp(token,TOK_MAXLEN) == 0 )
+    {
+        /* Max Length (Save off line for later) */
+        snprintf( MAXLEN, sizeof(MAXLEN), "%s", format_line );
+        if( first_print == 1)
+        {
+            first_print = 0;
+        }        
+        else
+        {
+            /* fprintf(labelfile,"%c",CRLF); */
+            insert( "\n",current_line);
+            current_line++;
+        }
+            
+        
+        MAXLIN = current_line;
+        
+    }
+    /* This may be used to exclude format file line (typically a comment line) from the print file */
+    else if (strcmp(token, TOK_SKIP) == 0 )
+    {
+        memset(token_str,'\0',MAX_STR);
+    }
+    
+    /* Justifcation tokens are used to set a modal flag and field width for justifcation of the following data.       !
+    ! Remains in effect until another justication command is found or is turned off.                                  !
+    ! Must appear on separate line and be followed by field width.                                                    !
+    ! Output is space padded to fill the entre width of the "field".                                                  !
+    ! Usage example: ~CENTER~40~                                                                                      !
+    ! Variables used to store length and justification code must be global to persist between calls since this is     !
+    ! called for each line of the format file                                                                        */
+    else if (strcmp(token, TOK_NOJUST) == 0 )
+    {
+        fld_width = 0;
+        just_cd =  JUST_NONE;
+        skip_just = 1;           /*Do not use justification for this token */
+    }
+    else if (strcmp(token, TOK_CENTER) == 0 )
+    {
+        snprintf(tmp1,sizeof(tmp1),"%s",str_split(1,format_line,token_delimiter));
+        snprintf(tmp2,sizeof(tmp2),"%s",str_split(2,format_line,token_delimiter));
+        snprintf(pos, sizeof(pos) ,"%s",str_split(3,format_line,token_delimiter));
+        
+        if ( strlen(pos) > 0 )
+        {
+            fld_width = atoi(pos);
+            just_cd = JUST_CENTER;
+            skip_just = 1;           /*Do not use justification for this token */
+        }
+    }
+    else if (strcmp(token, TOK_RIGHT) == 0 )
+    {
+        snprintf(tmp1,sizeof(tmp1),"%s",str_split(1,format_line,token_delimiter));
+        snprintf(tmp2,sizeof(tmp2),"%s",str_split(2,format_line,token_delimiter));
+        snprintf(pos, sizeof(pos) ,"%s",str_split(3,format_line,token_delimiter));
+        
+        if ( strlen(pos) > 0 )
+        {
+            fld_width = atoi(pos);
+            just_cd = JUST_RIGHT;
+            skip_just = 1;           /*Do not use justification for this token */
+        }
+    }
+    else if (strcmp(token, TOK_LEFT) == 0 )
+    {
+        snprintf(tmp1,sizeof(tmp1),"%s",str_split(1,format_line,token_delimiter));
+        snprintf(tmp2,sizeof(tmp2),"%s",str_split(2,format_line,token_delimiter));
+        snprintf(pos, sizeof(pos) ,"%s",str_split(3,format_line,token_delimiter));
+        
+        if ( strlen(pos) > 0 )
+        {
+            fld_width = atoi(pos);
+            just_cd = JUST_LEFT;
+            skip_just = 1;           /*Do not use justification for this token */
+        }
+    }
+    
+    /* The field width token is used to truncate a token string to fit the space on the label
+       without having to truncate the data returned from the database. Usage: ~WIDTH~25      */
+    else if (strcmp(token, TOK_WIDTH) == 0 )
+    {
+        snprintf(tmp1,sizeof(tmp1),"%s",str_split(1,format_line,token_delimiter));
+        snprintf(tmp2,sizeof(tmp2),"%s",str_split(2,format_line,token_delimiter));
+        snprintf(pos, sizeof(pos) ,"%s",str_split(3,format_line,token_delimiter));
+        
+        if ( strlen(pos) > 0 )
+        {
+            width   = atoi(pos);
+            skip_just = 1;           /*Do not use justification for this token */
+        }
+    }
+    else if (strcmp(token, TOK_NOWIDTH) == 0 )
+    {
+        width   = 0;
+        skip_just = 1;           /*Do not use justification for this token */
+    }
+    
+    /* This is where all the other tokens are substituted */
+    else
+    {
+        /* Note an unrecognized token wont have a value (no different from a known token without a value) */
+        snprintf(token_str,MAX_STR,"%s", get_token( token) );
+    }
+    
+    /* If not the width tokens and a positive width was specified then truncate string to specified width */
+    if ( skip_width == 0 && width > 0 )
+        snprintf(token_str,MAX_STR,"%s", substr( token_str, 1, width ));
+    
+    if ( skip_just == 0 && fld_width > 0 && just_cd != JUST_NONE )
+    {
+        len = strlen(token_str);
+        /* Truncate string that is longer than field width */
+        if ( len > fld_width )
+            snprintf(token_str,MAX_STR,"%s", substr( token_str, 1, fld_width ));
+        
+        if ( len < fld_width )
+        {
+            switch ( just_cd )
+            {
+               case JUST_LEFT : 
+                    /* Right pad with spaces */
+                    snprintf(token_str,MAX_STR,"%s", rpad( token_str, fld_width, ' ' ));
+                    break;
+                case JUST_RIGHT : 
+                    /* Left pad with spaces */
+                    snprintf(token_str,MAX_STR,"%s", lpad( token_str, fld_width, ' ' ));
+                    break;
+                case JUST_CENTER : 
+                    /* Split the difference then round up to get the right padding */
+                    padLen = (len + ( (fld_width - len ) / 2));
+                    snprintf(token_str,MAX_STR,"%s", rpad( token_str, padLen, ' ' ));
+                    /* Whatever remains is padded on the left */
+                    snprintf(token_str,MAX_STR,"%s", lpad( token_str, fld_width, ' ' ));
+                    break;
+                default :
+                    break;
+            }
+        }
+    }
+}
+    
+/****************************************************************************
+* Function : get_token                                                      *
+*                                                                           *
+* This function is extract the token from the structure array.              *
+*                                                                           *
+****************************************************************************/    
+
+char* get_token( char name[])
+{
+    int ii = 0;
+    static char tmp_ret_value[MAX_STR];
+    
+    memset(tmp_ret_value,'\0',sizeof(tmp_ret_value) );
+    
+    while ( ii < tok_arr_rec )
+    {
+        if ( strcmp(tok_arr[ii].name,name) == 0 )
+        {
+            snprintf(tmp_ret_value,sizeof(tmp_ret_value),"%s",tok_arr[ii].value);
+            break;
+        }
+        ii++;
+    }
+    return (tmp_ret_value);
+}
+
+/****************************************************************************
+* Function : insert_file                                                    *
+*                                                                           *
+* Read the records of the file and write to the report file                 *
+*                                                                           *
+****************************************************************************/
+
+void insert_file( char file_name[] )
+{
+    char path[100]      = "";
+    char file_spec[200] = "";
+    char tmp_msg[150]   = "";
+    char str[132+2]       = "";
+    
+    FILE *repfile = NULL;    
+    
+    
+    /* If file name has environment variable for path then build file specification */
+    if ( file_name[0] == '$' )
+    {
+        snprintf(path,sizeof(path),"%s", str_split(1,file_name,'/'));
+        snprintf(file_spec,sizeof(file_spec),"%s/%s", getenv( path ), str_split(2,file_name,'/'));
+    }
+    else
+    {
+        snprintf(file_spec,sizeof(file_spec),"%s", file_name);
+    }
+    
+    repfile = fopen (file_name, "a");
+    
+    if ( repfile == NULL )
+    {
+        snprintf(tmp_msg,sizeof(tmp_msg),"Insert File Open Failed: %s[%s]", file_spec, file_name);
+        debug( tmp_msg );
+    }
+    else
+    {
+        snprintf(tmp_msg,sizeof(tmp_msg),"Inserting contents of file: %s", file_spec);
+        debug( tmp_msg );
+        while(fgets(str, sizeof(str), repfile)!=NULL)
+        {
+            snprintf(str,sizeof(str),"\n%s%c", str,CRLF);
+            /* fprintf(repfile,"\n%s",str); */
+            insert( str,current_line);
+            current_line++;
+        }
+    }
+    if ( repfile != NULL )
+        fclose(repfile);
+}
+
+
+/****************************************************************************
+* Function : write_maxlen                                                   *
+*                                                                           *
+* Some printers (comtec, Monarch) require the length of the label to        *
+* be specified in the print file. So it is computed at runtime and          *
+* written to the file (usually near the beginning of the file).             *
+* One slick trick is that we remember the report line number                *
+* (in variable MAXLIN) where the print command is supposed to be            *
+* written and when the report is complete we write it there.                *
+*                                                                           *
+****************************************************************************/
+
+void write_maxlen( )
+{
+    char  tmp1[MAX_STR]    = "";
+    char  token[MAX_STR]   = "";
+    char  tmp2[MAX_STR]    = "";
+    char  tmp_msg[MAX_STR] = "";
+    //int   upd_print_flag   = 1 ;
+    
+    if ( strcmp(MAXLEN,"") == 0 )
+    {
+        snprintf(tmp1,sizeof(tmp1) ,"%s",str_split(1,MAXLEN,token_delimiter));
+        snprintf(token,sizeof(token),"%s",str_split(2,MAXLEN,token_delimiter));
+        snprintf(tmp2, sizeof(tmp2) ,"%s",str_split(3,MAXLEN,token_delimiter));
+        
+        if ( DVPOS < 0 )
+        {
+            //upd_print_flag = 0;
+            snprintf(tmp_msg,sizeof(tmp_msg) ,"%s","Missing DVPOS token");
+            add_msg( tmp_msg );
+            DVPOS = 0;
+        }
+        if ( DVINC < 0 )
+        {
+            //upd_print_flag = 0;
+            snprintf(tmp_msg,sizeof(tmp_msg) ,"%s","Missing DVINC token");
+            add_msg( tmp_msg );
+            DVINC = 40;
+        }
+        DVPOS += DVINC;
+        snprintf(tmp_msg,sizeof(tmp_msg) ,"%s%d%s%c",tmp1,DVPOS,tmp2,CRLF);
+        /* fprintf(labelfile,"%s",tmp_msg); */
+        insert( tmp_msg,MAXLIN);
+        current_line++;
+    }
+    
+}
+
+void insert(char data[], int n)
+{
+    int i;
+    struct Node* temp1  = (struct Node*) malloc(sizeof(struct Node));
+    snprintf( temp1->data, sizeof(temp1->data), "%s", data);
+    temp1->next = NULL;
+    if(n == 1)
+    {
+        temp1->next = head;
+        head = temp1;
+        return;
+    }
+    struct Node* temp2 = head;
+    for(i=0;i<n-2;i++)
+    {
+        temp2 = temp2->next;
+    }
+ 
+    temp1->next = temp2->next;
+    temp2->next = temp1;
+}
+
+void write_label()
+{
+    struct Node* temp = head;
+    while(temp!=NULL)
+    {
+        //printf("%s", temp->data);
+        fprintf(labelfile,"%s",temp->data);
+        temp = temp->next;
+    }
+    
+    if (labelfile != NULL)
+        fclose(labelfile);
+}
+
+char* extract_arg( char str[], int pos )
+{
+    static char out_str[132] = "";
+    int c = 0, i = 0;
+    short write_flag = 0, count = 0;
+        
+    for ( c = 0; c < strlen(str); c++ )
+    {
+        if ( write_flag == 1 && str[c] != '"')
+        {
+            out_str[i] = str[c];
+            i++;
+        }
+        
+        if ( str[c] == '"' )
+        {
+            if ( write_flag == 0 )
+            {
+                write_flag = 1;
+                i = 0;
+            }
+            else
+            {
+                write_flag = 0;
+                out_str[i] = '\0';
+                count++;
+            }
+        }
+                
+        if ( count == pos )
+            break; 
+    }
+    
+    return (out_str);
+}
+
+                           /*   End OF the Program   */
